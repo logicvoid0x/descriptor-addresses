@@ -1,4 +1,4 @@
-# wallet-descriptors
+# descriptor-addresses
 
 A Rust crate that turns Bitcoin **output descriptors** into derived addresses, for single-sig
 and multisig. Watch-only by construction — it handles public key material exclusively and
