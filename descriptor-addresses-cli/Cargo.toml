@@ -1,0 +1,20 @@
+[package]
+name = "descriptor-addresses-cli"
+version = "0.1.0"
+description = "descaddr — derive addresses from a Bitcoin output descriptor at a terminal."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "descaddr"
+path = "src/main.rs"
+
+# Argument parsing is hand-rolled for now. `clap` (builder API, 4 packages) is the
+# settled choice and arrives with ticket 08, which owns the CLI dependency budget
+# and the process boundary; pulling it in here would spend that budget before the
+# ticket that measures it.
+[dependencies]
+descriptor-addresses = { path = "../descriptor-addresses", version = "0.1.0" }

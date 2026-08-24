@@ -1,0 +1,27 @@
+[package]
+name = "descriptor-addresses"
+version = "0.1.0"
+description = "Turn Bitcoin output descriptors into derived addresses. Watch-only by construction."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The dependency list is the crate's central security claim, so it is deliberately
+# short and deliberately UNCONDITIONAL — no feature can add to it.
+#
+# Measured with `cargo tree -p descriptor-addresses -e normal`:
+#   * 12 distinct crates, of which 10 are rust-bitcoin org
+#   * 13 compiled units, because `hex-conservative` resolves twice — 0.2.2 for
+#     `bitcoin`, 1.2.0 for `miniscript`. Stated explicitly because a claim this
+#     load-bearing should not depend on which of the two numbers you meant.
+#   * 0 proc-macro crates. `syn` appears only under `cc`/`find-msvc-tools`, which
+#     are BUILD dependencies of `secp256k1-sys` — they compile the C library and
+#     are not linked into ours. The stated policy covers the normal graph.
+#
+# `bitcoin` is direct rather than reached through `miniscript::bitcoin` because
+# `Address`, `ScriptBuf` and `Network` are in the public interface, and a public
+# type must come from a dependency we declare.
+[dependencies]
+miniscript = "13.1"
+bitcoin = "0.32"
