@@ -2,8 +2,21 @@
 members = ["descriptor-addresses", "descriptor-addresses-cli"]
 resolver = "2"
 
+# One source of truth for the MSRV, so raising it is a one-line change rather
+# than an edit in five places that can disagree.
+#
+# There is a constraint on this block worth knowing before anyone lowers the
+# number: `[workspace.package]` inheritance itself requires Cargo 1.64. When the
+# MSRV briefly read 1.63.0, these manifests claimed a version whose own Cargo
+# could not parse them — a promise broken by the file making it. That is safe at
+# 1.74.0 and unsafe below 1.64. The MSRV job is what caught it.
 [workspace.package]
 edition = "2021"
-rust-version = "1.63.0"
+# 1.74.0, not the 1.63.0 first recorded "matching miniscript". miniscript 13.1.0
+# declares 1.63.0 but pulls hex-conservative 1.x, which resolves to 1.2.0 and
+# declares 1.74.0 — and miniscript's own constraint refuses an older one, so no
+# lockfile pin reaches underneath. Measured 2026-08-25; see amendment A1 on the
+# Dependency Version and Upgrade Policy ticket.
+rust-version = "1.74.0"
 license = "MIT"
 repository = "https://github.com/logicvoid0x/descriptor-addresses"

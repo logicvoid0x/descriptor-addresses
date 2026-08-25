@@ -45,8 +45,8 @@ impl ValidatedDescriptor {
             return Err(DescriptorError::HardenedWildcard);
         }
 
-        let parsed =
-            Descriptor::<DescriptorPublicKey>::from_str(descriptor).map_err(DescriptorError::parse)?;
+        let parsed = Descriptor::<DescriptorPublicKey>::from_str(descriptor)
+            .map_err(DescriptorError::parse)?;
 
         // Ticket 03 replaces this with the recursive walk over a leaf policy and a
         // depth bound. Until then the allowlist is a single form, but it is already an
@@ -83,7 +83,11 @@ impl ValidatedDescriptor {
             return Err(DescriptorError::MultipathArity { paths: paths.len() });
         }
 
-        let internal = if paths.len() == 2 { Some(paths.remove(1)) } else { None };
+        let internal = if paths.len() == 2 {
+            Some(paths.remove(1))
+        } else {
+            None
+        };
         let external = paths.remove(0);
 
         Ok(ValidatedDescriptor {
