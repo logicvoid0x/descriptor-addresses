@@ -96,8 +96,7 @@ fn run(args: Vec<String>) -> Result<String, Failure> {
         }
     }
 
-    let descriptor =
-        descriptor.ok_or_else(|| Failure::Usage("no descriptor given".to_string()))?;
+    let descriptor = descriptor.ok_or_else(|| Failure::Usage("no descriptor given".to_string()))?;
     let start = NormalIndex::new(start).ok_or_else(|| {
         Failure::Usage("--start must be below 2147483648, the first hardened index".to_string())
     })?;
@@ -188,7 +187,9 @@ mod tests {
     #[test]
     fn lists_both_keychains_by_default() {
         let descriptor = format!("wpkh({}/<0;1>/*)", XPUB);
-        let out = run(args(&["list", &descriptor, "--count", "2"])).ok().unwrap();
+        let out = run(args(&["list", &descriptor, "--count", "2"]))
+            .ok()
+            .unwrap();
 
         assert!(out.contains("bc1qp5wfcq48h6d63wyy9qz0awtpfqwwv4sma86mhz"));
         assert_eq!(out.matches("receive").count(), 2);
@@ -209,7 +210,9 @@ mod tests {
     #[test]
     fn a_single_path_descriptor_lists_only_receive() {
         let descriptor = format!("wpkh({}/0/*)", XPUB);
-        let out = run(args(&["list", &descriptor, "--count", "3"])).ok().unwrap();
+        let out = run(args(&["list", &descriptor, "--count", "3"]))
+            .ok()
+            .unwrap();
 
         assert_eq!(out.matches("receive").count(), 3);
         assert!(!out.contains("change"));

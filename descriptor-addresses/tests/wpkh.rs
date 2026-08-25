@@ -49,7 +49,9 @@ fn derives_the_external_keychain() {
 #[test]
 fn derives_the_internal_keychain() {
     let d = ValidatedDescriptor::parse(&h_form(), Network::Bitcoin).expect("valid wpkh");
-    let internal = d.internal().expect("two-path descriptor has a change keychain");
+    let internal = d
+        .internal()
+        .expect("two-path descriptor has a change keychain");
 
     let expected = [
         "bc1q7zwtzcqsm3k43ha0ac7nl8cz0hqrhckywf6sew",

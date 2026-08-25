@@ -1,0 +1,49 @@
+# Advisory policy, applied to the WHOLE workspace.
+#
+# Bans live in a separate file (ci/deny-bans.toml) because the two checks have
+# different scopes and one config cannot express both: advisories must cover
+# everything we ship, including the CLI, while the no-proc-macro ban binds the
+# library alone. Collapsing them would either exempt the CLI from advisories or
+# subject it to a rule the spec says does not apply to it.
+#
+# ---------------------------------------------------------------------------
+# STATUS: written but NOT YET EXECUTED. cargo-deny could not be built on the
+# development machine — an Application Control policy blocks build-script
+# executables under %TEMP%, and `cargo install` builds there. The first real run
+# of this file will be in CI. Treat a first-run failure as a bug in this file
+# before treating it as a policy violation.
+#
+# The dependency-budget check in ci/check-dependency-budget.sh WAS verified
+# locally, red and green, and is the stronger guarantee: it is a whitelist, so
+# it catches anything new, where a ban list only catches what it names.
+# ---------------------------------------------------------------------------
+
+[graph]
+# The platforms we claim to support. Windows earns its place: it is where
+# secp256k1's C sources need MSVC, the build that silently could not run for
+# this project until a toolchain was installed.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+
+# Dev-dependencies are exempt by design. The claim this defends is about what a
+# CONSUMER links, not what we test with.
+exclude-dev = true
+
+[advisories]
+yanked = "deny"
+
+# Un-failing an advisory requires an entry here, and the entry MUST carry an
+# `expiration`. A date written into prose is not a suppression that lapses — it
+# is an open-ended suppression with a comment, which is exactly what the policy
+# forbids. `expiration` is the field that makes the deadline real:
+#
+#   ignore = [
+#       { id = "RUSTSEC-0000-0000", reason = "no fix upstream; tracked in #NN", expiration = "2026-12-31" },
+#   ]
+#
+# If an advisory is material and has no fix, that is a release blocker and it
+# belongs in TRUST.md, not in this list.
+ignore = []

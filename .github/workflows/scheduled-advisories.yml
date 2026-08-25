@@ -1,0 +1,32 @@
+# The scheduled half of the supply-chain policy.
+#
+# This workflow exists because of a gap the per-PR check cannot cover: an
+# advisory published against a dependency we have not touched has no commit to
+# trigger CI. Without a scheduled run, a CVE filed the day after the last merge
+# is noticed whenever someone next happens to open a pull request — which, on a
+# small crate between releases, can be months.
+#
+# Advisories only. Bans and licenses are properties of the code, so they change
+# only when someone changes the code, and the per-PR check already covers them.
+# Re-running them here would produce noise that trains people to ignore the job.
+
+name: Scheduled advisories
+
+on:
+  schedule:
+    # 07:00 UTC daily. A weekday-only schedule would leave a Friday advisory
+    # unnoticed until Monday.
+    - cron: "0 7 * * *"
+  # Manually runnable, so a maintainer who hears about an advisory can check
+  # without waiting for the next tick or faking a commit.
+  workflow_dispatch:
+
+jobs:
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny --all-features check advisories

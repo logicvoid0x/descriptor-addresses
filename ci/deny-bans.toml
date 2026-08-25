@@ -1,0 +1,59 @@
+# Ban policy, applied to the LIBRARY ONLY.
+#
+# Separate from deny.toml because the scopes genuinely differ. The spec says:
+# "No proc-macro crates in the library's normal dependency graph — stated
+# policy, enforced by a CI ban list. Dev-dependencies and the CLI are exempt."
+#
+# The CLI exemption is not hypothetical. Ticket 08 budgets the CLI at 35
+# packages including one proc-macro (a doc-only macro), so a workspace-wide ban
+# would fail CI on a rule that ticket is explicitly allowed to break.
+#
+# STATUS: never executed. See the header of deny.toml.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+exclude-dev = true
+
+# This is the line that makes the exemption real. `exclude-dev` covers only
+# dev-dependencies; without this, cargo-deny walks the whole workspace and the
+# CLI's dependencies are judged by the library's rule.
+exclude = ["descriptor-addresses-cli"]
+
+[bans]
+multiple-versions = "deny"
+
+# hex-conservative legitimately resolves twice: 0.2.2 for bitcoin, 1.2.0 for
+# miniscript. The skip is VERSION-QUALIFIED on purpose — an unqualified skip
+# would wave through a third version too, which is precisely the case we would
+# want to hear about.
+#
+# NOTE: this entry's exact spelling is the single most likely thing in these two
+# files to fail on the first CI run, because cargo-deny changed the syntax for
+# package specs across versions and none of this could be executed locally.
+# If it errors, the alternatives are `{ crate = "hex-conservative:0.2.2" }` and
+# `{ name = "hex-conservative", version = "=0.2.2" }`.
+skip = [
+    { crate = "hex-conservative@0.2.2", reason = "bitcoin 0.32 pins 0.2.x; miniscript 13.1 pins 1.x. Not ours to reconcile — it resolves when miniscript ships against a newer bitcoin." },
+]
+
+# The no-proc-macro rule, named.
+#
+# Weaker than the whitelist in ci/expected-library-crates.txt, and kept anyway
+# because it produces a specific error naming the rule that was broken, where
+# the whitelist only says "something new appeared". Both run; not redundant.
+#
+# proc-macro2, quote and syn are the near-universal chain — essentially every
+# derive macro pulls at least one — so denying those three catches far more than
+# the named crates beneath them.
+deny = [
+    { crate = "proc-macro2", reason = "proc-macro chain; the library's zero-proc-macro claim is its central security argument" },
+    { crate = "quote", reason = "proc-macro chain" },
+    { crate = "syn", reason = "proc-macro chain" },
+    { crate = "serde_derive", reason = "use serde without the derive feature and hand-write the impl" },
+    { crate = "thiserror", reason = "rejected deliberately: the error enums are hand-written to keep the graph proc-macro free" },
+    { crate = "derive_more", reason = "reaches the graph via crossterm's `events` feature, which this project never needs" },
+]

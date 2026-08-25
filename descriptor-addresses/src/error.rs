@@ -74,11 +74,9 @@ impl fmt::Display for DescriptorError {
                 "a hardened step cannot be a wildcard: use `/*` for the derivable \
                  position, and put hardened steps in the key origin"
             ),
-            DescriptorError::MultipathArity { paths } => write!(
-                f,
-                "expected one or two derivation paths, found {}",
-                paths
-            ),
+            DescriptorError::MultipathArity { paths } => {
+                write!(f, "expected one or two derivation paths, found {}", paths)
+            }
         }
     }
 }

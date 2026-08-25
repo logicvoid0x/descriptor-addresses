@@ -1,0 +1,33 @@
+# The library's normal dependency graph, in full.
+#
+# This file is a WHITELIST, not a blocklist, and that is the point. A blocklist of
+# proc-macro crate names only catches what someone thought to name; this catches
+# anything new at all — a proc-macro, a heavyweight transitive addition, or a crate
+# that simply should not be here. "Twelve packages, zero proc-macro crates" is the
+# crate's central security argument, and an argument nobody checks is a slogan.
+#
+# Checked by ci/check-dependency-budget.sh against:
+#     cargo tree -p descriptor-addresses -e normal
+#
+# Scope: NORMAL dependencies of the library only. Dev-dependencies and the
+# descriptor-addresses-cli crate are deliberately exempt — the claim is about what a
+# consumer links, not about what we test with.
+#
+# Ten of the twelve are rust-bitcoin org crates. Note hex-conservative appears once
+# here but resolves to TWO versions (0.2.2 for bitcoin, 1.2.0 for miniscript), so the
+# compiled-unit count is 13. Both numbers are stated in the library manifest.
+#
+# Changing this file is a deliberate act: it should appear in a diff, with a reason.
+
+arrayvec
+base58ck
+bech32
+bitcoin
+bitcoin-io
+bitcoin-units
+bitcoin_hashes
+hex-conservative
+hex_lit
+miniscript
+secp256k1
+secp256k1-sys

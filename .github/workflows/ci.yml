@@ -1,0 +1,162 @@
+# Per-pull-request checks.
+#
+# The scheduled half of the policy lives in scheduled-advisories.yml, and the
+# split is deliberate: an advisory filed against code nobody touched has no
+# commit to trigger this workflow, so a per-PR check alone would never fire.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# `RUSTFLAGS: -D warnings` is deliberately NOT set workflow-wide. Cargo caps
+# registry dependencies' lints with `--cap-lints allow`, so in principle it is
+# harmless — but the msrv and minimal-versions jobs exist to answer "does this
+# combination build at all", and a lint escalation is the wrong way for either
+# to fail. It is set per-job where it belongs.
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is not here for convenience. It is where secp256k1's C sources
+        # need MSVC, which is exactly the build that silently could not run for
+        # this project until a toolchain was installed on the dev machine.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+      # Doctests are called out separately because they cannot run on the
+      # project's development machine at all — an Application Control policy
+      # blocks rustdoc.exe there. CI is the only place the documented examples
+      # are actually executed, so a silent skip here would leave them unchecked.
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+  # Not asked for by the ticket, and kept anyway: unlike the flags this project
+  # has removed for being unrequested, a formatting gate cannot mislead anyone
+  # about their money. It costs one job and every later ticket inherits it.
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+
+  msrv:
+    name: MSRV 1.74.0
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned exactly, not "oldest supported". An MSRV claim nobody tests rots
+      # within two bumps, and this crate publishes 1.74.0 as a promise.
+      #
+      # 1.74.0 rather than miniscript's declared 1.63.0: miniscript depends on
+      # hex-conservative 1.x, which resolves to 1.2.0 and needs 1.74.0. This job
+      # is what found that, on its first run.
+      - uses: dtolnay/rust-toolchain@1.74.0
+      - uses: Swatinem/rust-cache@v2
+      # `check`, not `test`: the dev-dependencies a test run needs are exempt
+      # from the MSRV promise, which covers what a consumer compiles.
+      #
+      # Default features, NOT --all-features. Enabling everything turns on
+      # bitcoin's optional `serde`, which drags in serde_derive and the whole
+      # proc-macro chain — so an --all-features MSRV job would be measuring a
+      # graph this crate never ships.
+      - run: cargo check --workspace
+
+  dependency-budget:
+    name: dependency budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The whitelist check: the library's normal graph must be EXACTLY the set
+      # in ci/expected-library-crates.txt. Verified locally, red and green.
+      - run: bash ci/check-dependency-budget.sh
+
+  supply-chain:
+    name: advisories + bans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      # Two invocations because the scopes differ, and running cargo-deny
+      # directly rather than through the action so the config each check uses is
+      # visible in the log rather than inferred from an action input.
+      #
+      # Advisories: the whole workspace. A CVE in a CLI dependency still ships
+      # to whoever installs the binary.
+      - name: Advisories (workspace)
+        run: cargo deny --all-features check advisories
+      # Bans: the library alone. The CLI is exempt by spec, and ticket 08 budgets
+      # it at 35 packages including one proc-macro — a workspace-wide ban would
+      # fail CI on a rule that ticket is allowed to break.
+      - name: Bans (library only)
+        run: cargo deny --config ci/deny-bans.toml check bans
+
+  minimal-versions:
+    name: lower dependency bounds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Nightly appears here as a TOOL, not as a test toolchain: it is used only
+      # to resolve a lockfile at the declared lower bounds, and the build and
+      # test that follow run on stable. The spec's "fuzzing is the only nightly
+      # job" is about what we test on, and that still holds.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve lockfile at minimum declared versions
+        run: cargo +nightly -Z direct-minimal-versions generate-lockfile
+      # `+stable` is load-bearing, not decoration. Both toolchain steps above run,
+      # and the later one sets the default — so a bare `cargo test` here would
+      # silently execute on nightly, quietly making this a second nightly job.
+      - name: Build and test against that floor
+        run: cargo +stable test --workspace
+
+  coverage:
+    name: coverage (reported, not gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure
+        run: cargo llvm-cov --workspace --summary-only
+      # Deliberately no threshold and no gate. Completeness of the negative
+      # roster is the real gate; a percentage target on a crate this size
+      # rewards testing accessors, which is the opposite of what matters here.
+      - name: Report
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info

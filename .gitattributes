@@ -1,0 +1,11 @@
+# Line endings are a repository decision, not a per-contributor setting.
+#
+# Without this, whether ci/check-dependency-budget.sh works depends on the
+# `core.autocrlf` value of whichever machine committed it. A shell script
+# checked out with CRLF fails on Linux with `bad interpreter: /usr/bin/env
+# bash^M` — so the CI job breaks, with an error pointing nowhere near the cause,
+# and only for some contributors.
+#
+# One rule covers every text file in the repository; per-extension lines would
+# only restate it.
+* text=auto eol=lf
