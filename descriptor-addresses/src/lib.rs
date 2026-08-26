@@ -78,6 +78,7 @@ mod index;
 mod origin;
 mod policy;
 mod record;
+mod rules;
 mod validated;
 
 /// The descriptor forms this build accepts, in descriptor syntax.
@@ -88,7 +89,7 @@ pub fn supported_forms() -> impl Iterator<Item = &'static str> {
     policy::allowed_forms()
 }
 
-pub use error::DescriptorError;
+pub use error::{AssemblyError, DescriptorError, KeyError, NetworkClass};
 pub use index::NormalIndex;
 pub use origin::KeyOrigin;
 pub use record::{AddressRecord, KeychainKind, ScriptType};
