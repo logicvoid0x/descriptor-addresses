@@ -631,3 +631,70 @@ fn a_malformed_origin_path_is_refused_at_construction() {
         }
     }
 }
+
+/// A review table is a read of the model, not a second copy of it.
+///
+/// Ticket 07's multisig flow shows fingerprint, origin and elided key back to the
+/// user before assembly. Without these accessors the CLI would have to re-split the
+/// string it already handed to `parse` — a second parser, disagreeing with this one
+/// the first time either changes.
+#[test]
+fn a_key_reports_the_parts_it_was_built_from() {
+    let bare = key(X1);
+    assert_eq!(bare.key(), X1);
+    assert_eq!(bare.fingerprint(), None);
+    assert_eq!(bare.origin_path(), None);
+
+    let with_fingerprint = key(&format!("[aabbccdd]{}", X1));
+    assert_eq!(with_fingerprint.key(), X1);
+    assert_eq!(with_fingerprint.fingerprint(), Some("aabbccdd"));
+    assert_eq!(with_fingerprint.origin_path(), None);
+
+    let full = key(&format!("[aabbccdd/48h/0h/0h/2h]{}", X1));
+    assert_eq!(full.key(), X1);
+    assert_eq!(full.fingerprint(), Some("aabbccdd"));
+    assert_eq!(full.origin_path(), Some("48h/0h/0h/2h"));
+}
+
+/// The path a key will be derived under is the one fact a review table exists to
+/// surface, and for a key with no origin of its own it is the BIP default — which the
+/// library picks. A CLI that wrote `48h/0h/0h/2h` into its own renderer would be
+/// stating as fact something only this crate decides.
+#[test]
+fn each_script_type_names_its_default_origin_path() {
+    assert_eq!(
+        SingleSigScript::Wpkh.default_origin_path(Network::Bitcoin),
+        "84h/0h/0h"
+    );
+    assert_eq!(
+        SingleSigScript::Tr.default_origin_path(Network::Testnet),
+        "86h/1h/0h"
+    );
+    assert_eq!(
+        MultisigScript::Wsh.default_origin_path(Network::Bitcoin),
+        "48h/0h/0h/2h"
+    );
+    assert_eq!(
+        MultisigScript::ShWsh.default_origin_path(Network::Testnet),
+        "48h/1h/0h/1h"
+    );
+}
+
+/// The accessors must describe the descriptor that actually gets built, or the review
+/// table is a lie that reviews itself. This pins the two together.
+#[test]
+fn the_reported_default_path_is_the_one_assembly_writes() {
+    let wallet = ValidatedDescriptor::assemble_multisig(multi(
+        MultisigScript::Wsh,
+        KeyOrdering::Sorted,
+        &[&format!("[aabbccdd]{}", X1), &format!("[11223344]{}", X2)],
+    ))
+    .expect("assembles");
+
+    let path = MultisigScript::Wsh.default_origin_path(Network::Bitcoin);
+    assert!(
+        wallet.canonical().contains(&format!("[aabbccdd/{}]", path)),
+        "got: {}",
+        wallet.canonical()
+    );
+}

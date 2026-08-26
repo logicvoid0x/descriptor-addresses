@@ -18,3 +18,16 @@ path = "src/main.rs"
 # ticket that measures it.
 [dependencies]
 descriptor-addresses = { path = "../descriptor-addresses", version = "0.1.0" }
+
+# Cursor movement and clearing, and nothing else. The review table has to redraw
+# in place when a key is edited, and `\r`-and-spaces does not move up a line.
+#
+# `default-features = false` matters more than the crate does. The default set
+# drags in `events` (mio, signal-hook) and `derive-more` (the `syn` chain), for
+# an interactive flow that reads whole lines from stdin and never polls a key
+# event. `windows` is kept because the Windows console needs its own code path
+# for the same escape sequences.
+#
+# `osc52` is deliberately absent: it belongs to `--copy`, which is ticket 08's,
+# along with the CLI dependency budget that measures the pair.
+crossterm = { version = "0.29", default-features = false, features = ["windows"] }

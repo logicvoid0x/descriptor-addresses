@@ -11,7 +11,10 @@
 //! process exits, so the addresses the user asked for are gone before they can use
 //! them. This binary therefore writes plain lines to stdout and nothing else.
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
+
+mod interactive;
 
 use descriptor_addresses::{
     AddressRecord, Advisory, DescriptorError, DescriptorKey, KeyOrdering, KeychainKind, Multisig,
@@ -25,6 +28,7 @@ USAGE:
     descaddr list <DESCRIPTOR> [--start N] [--count N] [--allow-duplicate-keys]
     descaddr echo <DESCRIPTOR>
     descaddr assemble --key K [--key K ...] --script TYPE [--threshold N] [--as-given]
+    descaddr assemble [--interactive]
 
 COMMANDS:
     list   derive and print addresses
@@ -35,6 +39,14 @@ OPTIONS:
     --start N   first index to derive (default 0)
     --count N   how many indices to derive (default 20)
     -h, --help  print this message
+
+    --interactive
+                prompt for keys, script type, threshold and ordering instead of
+                taking them as flags. Assumed when `assemble` is run with no
+                flags at a terminal; required when stdin is a pipe, so a script
+                that forgot an argument gets an error rather than a prompt it
+                cannot answer. Prompts are written to stderr, so the assembled
+                descriptor can still be redirected on its own.
 
     --allow-duplicate-keys
                 accept a descriptor in which a key appears twice. Such a wallet
@@ -76,6 +88,12 @@ fn main() -> ExitCode {
         }
         Err(Failure::Assembly(e)) => {
             eprintln!("error: {}", e);
+            ExitCode::FAILURE
+        }
+        Err(Failure::Aborted(message)) => {
+            eprintln!("{}", message);
+            // Non-zero: a caller that asked for a wallet did not get one, and a
+            // script that stopped checking here would go on to derive from nothing.
             ExitCode::FAILURE
         }
     }
@@ -131,6 +149,10 @@ enum Failure {
     Key(descriptor_addresses::KeyError),
     /// The parts did not assemble into something this crate accepts.
     Assembly(descriptor_addresses::AssemblyError),
+    /// The interactive flow did not finish: the input ended, or the user said no.
+    /// Its message is already a sentence addressed to the person who typed it, so it
+    /// is printed as-is rather than prefixed `error:`.
+    Aborted(String),
 }
 
 impl From<DescriptorError> for Failure {
@@ -159,14 +181,17 @@ fn run(args: Vec<String>) -> Result<Output, Failure> {
 /// seen it before. It is printed first, and on its own line, so it can be redirected
 /// to a file without the address table coming with it.
 ///
-/// This is the non-interactive half. Prompting for the same values when flags are
-/// absent is a later ticket, and it will call these same library functions with these
-/// same structs — the library cannot tell the difference.
+/// Values arrive either as flags or through prompts, and the two meet here: both
+/// build a [`SingleSig`] or a [`Multisig`] and hand it to the library, which cannot
+/// tell them apart. There is no second input path and no rule reachable from one route
+/// and not the other.
 fn assemble(args: &[String]) -> Result<Output, Failure> {
     let mut keys: Vec<String> = Vec::new();
     let mut script: Option<String> = None;
     let mut threshold: Option<u32> = None;
     let mut ordering = KeyOrdering::Sorted;
+    let mut ordering_given = false;
+    let mut interactive = false;
     let mut count: u32 = 20;
 
     let mut rest = args.iter();
@@ -179,9 +204,27 @@ fn assemble(args: &[String]) -> Result<Output, Failure> {
             // `sortedmulti` is the default because it is the safe one: every cosigner
             // derives the same addresses regardless of the order they typed keys in.
             // Choosing `multi` makes the order part of the wallet, so it is opt-in.
-            "--as-given" => ordering = KeyOrdering::AsGiven,
+            "--as-given" => {
+                ordering = KeyOrdering::AsGiven;
+                ordering_given = true;
+            }
+            "--interactive" => interactive = true,
             other => return Err(Failure::Usage(format!("unknown option `{}`", other))),
         }
+    }
+
+    // `--count` is not in this set. It says how much of the wallet to print, not what
+    // the wallet is, so it composes with either route.
+    let flags_given = !keys.is_empty() || script.is_some() || threshold.is_some() || ordering_given;
+
+    // Exhaustive rather than `if let`, so a third route cannot be added without
+    // deciding here what it does.
+    match route(flags_given, interactive, std::io::stdin().is_terminal())? {
+        Route::Prompt => {
+            let wallet = interactive::Session::on_stdio().assemble(Network::Bitcoin)?;
+            return Ok(render_output(&wallet, count));
+        }
+        Route::Flags => {}
     }
 
     if keys.is_empty() {
@@ -232,16 +275,74 @@ fn assemble(args: &[String]) -> Result<Output, Failure> {
     }
     .map_err(Failure::Assembly)?;
 
+    Ok(render_output(&wallet, count))
+}
+
+/// Where `assemble` gets its values from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Read them from the flags already parsed.
+    Flags,
+    /// Ask for them.
+    Prompt,
+}
+
+/// Choose between reading flags and asking questions.
+///
+/// A free function of three booleans rather than a branch inside `assemble`, because
+/// one of the three is "stdin is a terminal" — and a test cannot be a terminal. The
+/// decision this ticket is really about is therefore the one part of it no
+/// process-boundary test could otherwise reach.
+///
+/// The three cases, and why the middle one is not a hang:
+///
+/// - **A terminal with no flags** is someone who ran `descaddr assemble` to be walked
+///   through it. Prompting is the answer; erroring at them is the behaviour this
+///   ticket exists to remove.
+/// - **A pipe with no flags** is a script that forgot an argument. Prompting at it
+///   would hang a build until something times out, so it gets an error that names the
+///   cause instead.
+/// - **`--interactive`** says "prompt anyway", which is how the flow is driven by an
+///   answer file, a heredoc or a test. It is required rather than inferred precisely
+///   so that the middle case can stay an error.
+fn route(flags_given: bool, interactive: bool, stdin_is_terminal: bool) -> Result<Route, Failure> {
+    match (flags_given, interactive) {
+        // Two answers to the same question, and no rule for which wins. Asking is
+        // better than picking, and better than merging them into a wallet that is
+        // half typed and half answered.
+        (true, true) => Err(Failure::Usage(
+            "--interactive prompts for the same values --key, --script, --threshold \
+             and --as-given supply: pass one or the other"
+                .to_string(),
+        )),
+        (true, false) => Ok(Route::Flags),
+        (false, true) => Ok(Route::Prompt),
+        (false, false) if stdin_is_terminal => Ok(Route::Prompt),
+        (false, false) => Err(Failure::Usage(
+            "nothing to assemble, and stdin is not a terminal so there is nobody to \
+             ask: pass --key for each cosigner along with --script, or --interactive \
+             to be prompted through the pipe"
+                .to_string(),
+        )),
+    }
+}
+
+/// What an assembled wallet prints, whichever route built it.
+///
+/// Shared by the flag path and the prompted one deliberately: if the two rendered
+/// separately, the descriptor a user confirmed on screen and the descriptor they
+/// backed up could drift apart, and nothing would say which was the wallet.
+fn render_output(wallet: &ValidatedDescriptor, count: u32) -> Output {
     let start = NormalIndex::ZERO;
     let mut records: Vec<AddressRecord> = wallet.external().addresses(start, count).collect();
     if let Some(change) = wallet.internal() {
         records.extend(change.addresses(start, count));
     }
 
-    Ok(Output {
-        stdout: format!("{}\n\n{}", wallet.canonical(), render(&wallet, &records)),
+    Output {
+        stdout: format!("{}\n\n{}", wallet.canonical(), render(wallet, &records)),
         advisories: render_advisories(wallet.advisories()),
-    })
+    }
 }
 
 fn single_sig_script(name: &str) -> Result<SingleSigScript, Failure> {
@@ -661,6 +762,52 @@ mod tests {
         assert!(!out.advisories.is_empty(), "this input has findings");
         assert!(!out.stdout.contains("note:"));
         assert!(out.stdout.contains("bc1q"));
+    }
+
+    /// The ticket's headline, and the one decision no test can otherwise reach: at a
+    /// terminal, missing flags are a question rather than an error.
+    #[test]
+    fn a_terminal_with_no_flags_is_prompted_not_refused() {
+        assert_eq!(route(false, false, true).ok(), Some(Route::Prompt));
+    }
+
+    /// The same absence through a pipe is a script that forgot an argument. It must
+    /// fail, because prompting at it hangs a build until something times out.
+    #[test]
+    fn a_pipe_with_no_flags_is_refused_not_prompted() {
+        match route(false, false, false) {
+            Err(Failure::Usage(message)) => {
+                assert!(message.contains("not a terminal"), "got: {}", message)
+            }
+            other => panic!("expected a usage refusal, got {:?}", other),
+        }
+    }
+
+    /// `--interactive` is what makes the flow drivable by an answer file — and it has
+    /// to work through a pipe, or the previous rule would make it untestable.
+    #[test]
+    fn interactive_prompts_whatever_stdin_is() {
+        assert_eq!(route(false, true, false).ok(), Some(Route::Prompt));
+        assert_eq!(route(false, true, true).ok(), Some(Route::Prompt));
+    }
+
+    /// Flags win a terminal. Someone who typed `--key` asked a complete question and
+    /// should not then be asked it again.
+    #[test]
+    fn flags_are_taken_at_a_terminal_without_prompting() {
+        assert_eq!(route(true, false, true).ok(), Some(Route::Flags));
+        assert_eq!(route(true, false, false).ok(), Some(Route::Flags));
+    }
+
+    /// Both at once is a question about which wins, and this tool does not guess.
+    #[test]
+    fn flags_and_interactive_together_are_a_usage_error() {
+        match route(true, true, true) {
+            Err(Failure::Usage(message)) => {
+                assert!(message.contains("--interactive"), "got: {}", message)
+            }
+            other => panic!("expected a usage refusal, got {:?}", other),
+        }
     }
 
     /// The nine allowlisted forms must all reach the renderer, not just the one the
