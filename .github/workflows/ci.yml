@@ -156,7 +156,7 @@ jobs:
       # rewards testing accessors, which is the opposite of what matters here.
       - name: Report
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: lcov.info
