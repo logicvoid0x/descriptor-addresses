@@ -205,10 +205,14 @@ fn checksum_matches(descriptor: &str) -> Result<(), DescriptorError> {
 // -------------------------------------------------------------- after parsing
 
 /// Rules that need the parsed structure.
+/// Returns the duplicate key found, if duplicates were permitted and one existed —
+/// so the caller can report as an advisory the very thing the strict path reports as
+/// an error. One detection, two destinations; the two cannot drift into disagreeing
+/// about what a duplicate is.
 pub(crate) fn after_parse(
     descriptor: &Descriptor<DescriptorPublicKey>,
     allow_duplicate_keys: bool,
-) -> Result<(), DescriptorError> {
+) -> Result<Option<String>, DescriptorError> {
     multipath_uniform(descriptor)?;
 
     // Before the duplicate check, and the order is load-bearing rather than
@@ -219,11 +223,14 @@ pub(crate) fn after_parse(
     // the quorum can be bypassed entirely.
     internal_key_not_in_leaves(descriptor)?;
 
-    if !allow_duplicate_keys {
-        no_duplicate_keys(descriptor)?;
+    // One detection, two destinations. The flag chooses whether the duplicate leaves
+    // here as an error or is handed back to become an advisory — it never changes
+    // what counts as a duplicate.
+    match (duplicate_key(descriptor), allow_duplicate_keys) {
+        (Some(key), false) => Err(DescriptorError::DuplicateKey { key }),
+        (found, true) => Ok(found),
+        (None, false) => Ok(None),
     }
-
-    Ok(())
 }
 
 /// Every multipath key must carry the same tuple of derivation paths.
@@ -235,7 +242,10 @@ pub(crate) fn after_parse(
 /// Comparing the tuples directly is order-independent and catches it before any
 /// splitting happens.
 ///
-/// **Either every key is two-path or none is.** Mixing them is refused, and the reason
+/// **Either every key is two-path or none is** — with one exemption, a raw `tr()`
+/// internal key, for the reasons in [`raw_internal_key`].
+///
+/// Mixing them is otherwise refused, and the reason
 /// is not truncation — nothing is discarded, and BIP-389 explicitly permits it.
 /// miniscript copies the non-multipath key into both expansions, so the change
 /// descriptor reuses a key from the receive descriptor. That is a privacy leak, and
@@ -248,20 +258,30 @@ pub(crate) fn after_parse(
 fn multipath_uniform(descriptor: &Descriptor<DescriptorPublicKey>) -> Result<(), DescriptorError> {
     let mut tuples: Vec<Vec<String>> = Vec::new();
 
+    // Exactly one key is exempt: a **raw** `tr()` internal key. See `raw_internal_key`
+    // for why the exemption is this narrow.
+    let exempt = raw_internal_key(descriptor);
+
     descriptor.for_each_key(|key| {
-        let tuple: Vec<String> = match key {
-            DescriptorPublicKey::MultiXPub(multi) => multi
-                .derivation_paths
-                .paths()
-                .iter()
-                .map(|path| path.to_string())
-                .collect(),
-            // A key with no multipath tuple is a one-element tuple, so mixing shows up
-            // as a length disagreement rather than needing a rule of its own.
-            DescriptorPublicKey::XPub(xpub) => vec![xpub.derivation_path.to_string()],
-            DescriptorPublicKey::Single(_) => vec![String::new()],
-        };
-        tuples.push(tuple);
+        if exempt.as_deref() == Some(key.to_string().as_str()) {
+            return true;
+        }
+        match key {
+            DescriptorPublicKey::MultiXPub(multi) => tuples.push(
+                multi
+                    .derivation_paths
+                    .paths()
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect(),
+            ),
+            // An extended key with no multipath tuple is a one-element tuple, so
+            // mixing shows up as a length disagreement rather than a rule of its own.
+            DescriptorPublicKey::XPub(xpub) => tuples.push(vec![xpub.derivation_path.to_string()]),
+            // A raw key that is not the exempt internal key — a cosigner's key in a
+            // leaf. One element, so it is caught by the same length disagreement.
+            DescriptorPublicKey::Single(_) => tuples.push(vec![key.to_string()]),
+        }
         true
     });
 
@@ -297,6 +317,38 @@ fn multipath_uniform(descriptor: &Descriptor<DescriptorPublicKey>) -> Result<(),
     Ok(())
 }
 
+/// A `tr()` internal key that is a raw (non-derivable) key, if there is one.
+///
+/// This is the **only** key exempt from the multipath uniformity rule, and from the
+/// origin-absence advisory, and the narrowness is the whole point.
+///
+/// Q11's harm is on-chain linkage: the same key visible in both the receive and the
+/// change script lets an observer connect the two chains. What decides that is whether
+/// the key is **wallet-unique** — not whether it derives.
+///
+/// - A raw `tr()` internal key is typically a NUMS point: a published constant that
+///   every script-path-only wallet shares, carrying nothing about *this* wallet, and
+///   tweaked by the merkle root before it ever reaches the chain. It also cannot carry
+///   a key origin, because there is no path to state. Exempting it is what lets
+///   `tr(NUMS, multi_a(k, A/<0;1>/*, …))` — the canonical script-path-only taproot
+///   multisig — parse at all.
+/// - A raw key **anywhere else** is a cosigner's key: wallet-unique, and appearing
+///   verbatim in both chains. An earlier draft exempted every `Single` key on the
+///   reasoning that a constant is shared "by nature rather than by copying". True, and
+///   irrelevant: an observer cannot see *why* two scripts share a key. A reviewer
+///   caught it by executing `wsh(multi(2,A/<0;1>/*,02f9308a…))` and finding the raw
+///   pubkey in both descriptors.
+/// - A *derivable* `tr()` internal key is not exempt either, and must not be: it is
+///   this wallet's key, and a single-path one beside multipath leaves would appear
+///   unchanged in both chains.
+pub(crate) fn raw_internal_key(descriptor: &Descriptor<DescriptorPublicKey>) -> Option<String> {
+    match descriptor {
+        Descriptor::Tr(tr) => matches!(tr.internal_key(), DescriptorPublicKey::Single(_))
+            .then(|| tr.internal_key().to_string()),
+        _ => None,
+    }
+}
+
 /// Render a key's derivation tuple the way it appears in a descriptor, so a refusal
 /// quotes something the user can find in their own text.
 fn render_tuple(tuple: &[String]) -> String {
@@ -311,7 +363,7 @@ fn render_tuple(tuple: &[String]) -> String {
 /// Compared on the **full key expression** rather than the xpub alone, so the same
 /// xpub at two different derivation paths is not a duplicate — it yields different
 /// public keys, and the quorum is real.
-fn no_duplicate_keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Result<(), DescriptorError> {
+fn duplicate_key(descriptor: &Descriptor<DescriptorPublicKey>) -> Option<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut duplicate: Option<String> = None;
 
@@ -325,10 +377,7 @@ fn no_duplicate_keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Result<(),
         true
     });
 
-    match duplicate {
-        Some(key) => Err(DescriptorError::DuplicateKey { key }),
-        None => Ok(()),
-    }
+    duplicate
 }
 
 /// A `tr()` internal key must not also appear in a leaf.

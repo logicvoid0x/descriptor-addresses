@@ -263,6 +263,63 @@ fn mixing_multipath_and_single_path_keys_is_refused() {
     }
 }
 
+/// A raw `tr()` **internal key** may accompany multipath leaf keys.
+///
+/// `tr(NUMS, multi_a(k, A/<0;1>/*, …))` is the canonical script-path-only taproot
+/// multisig, and a NUMS point is a raw key with no derivation path. Treating it as a
+/// one-element tuple made it "disagree" with the multipath leaves and refused the form
+/// outright.
+///
+/// The exemption is justified by *wallet-uniqueness*, not by derivability: a NUMS
+/// point is a published constant every such wallet shares, so seeing it in both chains
+/// links nothing — and taproot tweaks it by the merkle root before it reaches the
+/// chain anyway.
+#[test]
+fn a_raw_taproot_internal_key_may_accompany_multipath_keys() {
+    const NUMS: &str = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
+
+    let d = accept(&format!(
+        "tr({},multi_a(2,{}/<0;1>/*,{}/<0;1>/*))",
+        NUMS, X2, X3
+    ));
+
+    assert!(d.internal().is_some(), "both keychains must survive");
+}
+
+/// The paired refusal, and the case the first version of the exemption got wrong.
+///
+/// A raw key in a **leaf** is a cosigner's key: wallet-unique, and appearing verbatim
+/// in both the receive and the change script. That is exactly the on-chain linkage
+/// Q11 exists to prevent, so the exemption must not reach it — "it derives nothing"
+/// is true of both keys and irrelevant to the harm, because an observer cannot see
+/// *why* two scripts share a key.
+///
+/// Found by a reviewer executing this input against the over-broad version.
+#[test]
+fn a_raw_cosigner_key_beside_multipath_keys_is_refused() {
+    // A valid secp256k1 point, used here as a bare cosigner key.
+    const RAW: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+
+    let descriptor = format!("wsh(multi(2,{}/<0;1>/*,{}))", X2, RAW);
+
+    match refuse(&descriptor) {
+        DescriptorError::MultipathNonUniform { .. } => {}
+        other => panic!("expected MultipathNonUniform, got {:?}", other),
+    }
+}
+
+/// And a derivable internal key is not exempt either: it is this wallet's own key, so
+/// a single-path one beside multipath leaves would appear unchanged in both chains.
+#[test]
+fn a_derivable_taproot_internal_key_is_not_exempt() {
+    let descriptor = format!("tr({}/0/*,multi_a(2,{}/<0;1>/*,{}/<0;1>/*))", X1, X2, X3);
+
+    match refuse(&descriptor) {
+        DescriptorError::MultipathNonUniform { .. } => {}
+        other => panic!("expected MultipathNonUniform, got {:?}", other),
+    }
+}
+
 /// Ordinary fixed paths differing between keys is not a multipath question at all —
 /// it is just two keys at different positions, and it must not be caught by the
 /// uniformity rule.

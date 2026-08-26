@@ -14,25 +14,48 @@
 use std::process::ExitCode;
 
 use descriptor_addresses::{
-    AddressRecord, DescriptorError, KeychainKind, Network, NormalIndex, ValidatedDescriptor,
+    AddressRecord, Advisory, DescriptorError, KeychainKind, Network, NormalIndex,
+    ValidatedDescriptor,
 };
 
 const USAGE: &str = "\
 descaddr — derive addresses from a Bitcoin output descriptor
 
 USAGE:
-    descaddr list <DESCRIPTOR> [--start N] [--count N]
+    descaddr list <DESCRIPTOR> [--start N] [--count N] [--allow-duplicate-keys]
+    descaddr echo <DESCRIPTOR>
+
+COMMANDS:
+    list   derive and print addresses
+    echo   print the full canonical descriptor, unelided
 
 OPTIONS:
     --start N   first index to derive (default 0)
     --count N   how many indices to derive (default 20)
     -h, --help  print this message
+
+    --allow-duplicate-keys
+                accept a descriptor in which a key appears twice. Such a wallet
+                has a smaller quorum than it looks — a 2-of-3 with a repeated
+                key is a 1-of-2 — so it is refused unless you say otherwise.
+                Relaxes this one rule and nothing else.
 ";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(Output { stdout, advisories }) => {
+            print!("{}", stdout);
+
+            // Advisories go to **stderr**, so `descaddr list … | jq` still receives
+            // clean output while a human at a terminal sees both. They are findings
+            // about input that was accepted, so they must not contaminate the data.
+            if !advisories.is_empty() {
+                eprint!("{}", advisories);
+            }
+
+            // Zero. An advisory is a remark about input this crate accepted, and a
+            // script that treats one as failure would refuse a wallet whose only
+            // fault is having no checksum.
             ExitCode::SUCCESS
         }
         Err(Failure::Usage(message)) => {
@@ -63,6 +86,30 @@ fn supported_forms() -> String {
     out
 }
 
+/// What a successful run produces: data for stdout, remarks for stderr.
+///
+/// Two fields rather than one string because they have different destinations and
+/// different meanings — one is the answer, the other is commentary about the question.
+#[derive(Debug)]
+struct Output {
+    stdout: String,
+    advisories: String,
+}
+
+/// Render advisories for a human.
+///
+/// Prefixed `note:` rather than `warning:`, deliberately. Every one of these describes
+/// input the crate **accepted**, and "warning" trains a reader to expect something is
+/// wrong — which, for the notation-rewritten advisory, is the exact misreading it
+/// exists to prevent.
+fn render_advisories(advisories: &[Advisory]) -> String {
+    let mut out = String::new();
+    for advisory in advisories {
+        out.push_str(&format!("note: {}\n", advisory));
+    }
+    out
+}
+
 #[derive(Debug)]
 enum Failure {
     Usage(String),
@@ -75,17 +122,57 @@ impl From<DescriptorError> for Failure {
     }
 }
 
-fn run(args: Vec<String>) -> Result<String, Failure> {
+fn run(args: Vec<String>) -> Result<Output, Failure> {
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         return Err(Failure::Usage("nothing to do".to_string()));
     }
-    if args[0] != "list" {
-        return Err(Failure::Usage(format!("unknown command `{}`", args[0])));
+
+    match args[0].as_str() {
+        "list" => list(&args[1..]),
+        "echo" => echo(&args[1..]),
+        other => Err(Failure::Usage(format!("unknown command `{}`", other))),
+    }
+}
+
+/// Print the full canonical descriptor and nothing else.
+///
+/// It exists because `list` elides the descriptor to one line to keep the table
+/// readable — and the descriptor is the single string a user must back up, so there
+/// has to be a way to see all of it. One string on stdout, so it can be redirected
+/// straight into a file.
+fn echo(args: &[String]) -> Result<Output, Failure> {
+    let descriptor = single_descriptor(args)?;
+    let wallet = ValidatedDescriptor::parse(&descriptor, Network::Bitcoin)?;
+
+    Ok(Output {
+        stdout: format!("{}\n", wallet.canonical()),
+        advisories: render_advisories(wallet.advisories()),
+    })
+}
+
+/// The one positional argument shared by both commands.
+fn single_descriptor(args: &[String]) -> Result<String, Failure> {
+    let mut descriptor: Option<String> = None;
+
+    for arg in args {
+        if arg.starts_with('-') {
+            return Err(Failure::Usage(format!("unknown option `{}`", arg)));
+        }
+        if descriptor.replace(arg.to_string()).is_some() {
+            return Err(Failure::Usage("more than one descriptor given".to_string()));
+        }
     }
 
+    descriptor.ok_or_else(|| Failure::Usage("no descriptor given".to_string()))
+}
+
+fn list(args: &[String]) -> Result<Output, Failure> {
     let mut descriptor: Option<String> = None;
     let mut start: u32 = 0;
     let mut count: u32 = 20;
+    // Ticket 03: the CLI maps `parse_permissive` to an explicit flag, so relaxing a
+    // safety rule is something a user types rather than something a tool decides.
+    let mut permissive = false;
 
     // Mainnet is hard-coded, and that is deliberate rather than unfinished. A
     // `--network` flag without the enforcement that goes with it is a footgun: it
@@ -95,9 +182,10 @@ fn run(args: Vec<String>) -> Result<String, Failure> {
     // makes network enforced rather than merely reported.
     let network = Network::Bitcoin;
 
-    let mut rest = args[1..].iter();
+    let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
+            "--allow-duplicate-keys" => permissive = true,
             "--start" => start = number("--start", rest.next())?,
             "--count" => count = number("--count", rest.next())?,
             other if other.starts_with('-') => {
@@ -116,14 +204,21 @@ fn run(args: Vec<String>) -> Result<String, Failure> {
         Failure::Usage("--start must be below 2147483648, the first hardened index".to_string())
     })?;
 
-    let wallet = ValidatedDescriptor::parse(&descriptor, network)?;
+    let wallet = if permissive {
+        ValidatedDescriptor::parse_permissive(&descriptor, network)?
+    } else {
+        ValidatedDescriptor::parse(&descriptor, network)?
+    };
 
     let mut records: Vec<AddressRecord> = wallet.external().addresses(start, count).collect();
     if let Some(change) = wallet.internal() {
         records.extend(change.addresses(start, count));
     }
 
-    Ok(render(&wallet, &records))
+    Ok(Output {
+        stdout: render(&wallet, &records),
+        advisories: render_advisories(wallet.advisories()),
+    })
 }
 
 fn number(flag: &str, value: Option<&String>) -> Result<u32, Failure> {
@@ -204,7 +299,8 @@ mod tests {
         let descriptor = format!("wpkh({}/<0;1>/*)", XPUB);
         let out = run(args(&["list", &descriptor, "--count", "2"]))
             .ok()
-            .unwrap();
+            .unwrap()
+            .stdout;
 
         assert!(out.contains("bc1qp5wfcq48h6d63wyy9qz0awtpfqwwv4sma86mhz"));
         assert_eq!(out.matches("receive").count(), 2);
@@ -216,7 +312,8 @@ mod tests {
         let descriptor = format!("wpkh({}/0/*)", XPUB);
         let out = run(args(&["list", &descriptor, "--start", "2", "--count", "1"]))
             .ok()
-            .unwrap();
+            .unwrap()
+            .stdout;
 
         assert!(out.contains("0/2"));
         assert!(!out.contains("0/0"));
@@ -227,7 +324,8 @@ mod tests {
         let descriptor = format!("wpkh({}/0/*)", XPUB);
         let out = run(args(&["list", &descriptor, "--count", "3"]))
             .ok()
-            .unwrap();
+            .unwrap()
+            .stdout;
 
         assert_eq!(out.matches("receive").count(), 3);
         assert!(!out.contains("change"));
@@ -271,6 +369,83 @@ mod tests {
         }
     }
 
+    /// `echo` prints the descriptor in full, which is the point: `list` elides it and
+    /// this is the string the user has to back up.
+    #[test]
+    fn echo_prints_the_whole_canonical_descriptor() {
+        let descriptor = format!("wpkh([aabbccdd/84h/0h/0h]{}/<0;1>/*)", XPUB);
+        let out = run(args(&["echo", &descriptor])).ok().unwrap().stdout;
+
+        // Whole, not elided — the elision marker must not appear.
+        assert!(!out.contains("..."), "got: {}", out);
+        assert!(out.contains(XPUB), "the full key must be present");
+        assert!(out.trim_end().ends_with("#4ws9vksj"), "got: {}", out);
+    }
+
+    /// Apostrophe input is echoed back in h-form, and the rewrite is explained rather
+    /// than left to look like a transcription error.
+    #[test]
+    fn echo_normalises_notation_and_says_so() {
+        let descriptor = format!("wpkh([aabbccdd/84'/0'/0']{}/<0;1>/*)", XPUB);
+        let out = run(args(&["echo", &descriptor])).ok().unwrap();
+
+        assert!(out.stdout.contains("84h/0h/0h"));
+        assert!(!out.stdout.contains('\''));
+        assert!(out.advisories.contains("note:"));
+        assert!(
+            out.advisories.contains("rewritten"),
+            "got: {}",
+            out.advisories
+        );
+    }
+
+    /// The relaxation is something a user types, never something the tool decides.
+    /// Without the flag the duplicate is refused; with it, the same finding arrives as
+    /// a note and the addresses are shown.
+    #[test]
+    fn allow_duplicate_keys_turns_the_refusal_into_a_note() {
+        let descriptor = format!("wsh(multi(2,{}/0/*,{}/0/*))", XPUB, XPUB);
+
+        match run(args(&["list", &descriptor, "--count", "1"])) {
+            Err(Failure::Descriptor(DescriptorError::DuplicateKey { .. })) => {}
+            other => panic!(
+                "expected DuplicateKey without the flag, got {:?}",
+                other.err()
+            ),
+        }
+
+        let out = run(args(&[
+            "list",
+            &descriptor,
+            "--count",
+            "1",
+            "--allow-duplicate-keys",
+        ]))
+        .ok()
+        .unwrap();
+
+        assert!(out.stdout.contains("bc1q"), "addresses are shown");
+        assert!(
+            out.advisories.contains("appears more than once"),
+            "got: {}",
+            out.advisories
+        );
+    }
+
+    /// Advisories are commentary, not data. They must not land on stdout, or piping
+    /// `descaddr list` into another tool would feed it prose.
+    #[test]
+    fn advisories_stay_out_of_stdout() {
+        let descriptor = format!("wpkh({}/<0;1>/*)", XPUB);
+        let out = run(args(&["list", &descriptor, "--count", "1"]))
+            .ok()
+            .unwrap();
+
+        assert!(!out.advisories.is_empty(), "this input has findings");
+        assert!(!out.stdout.contains("note:"));
+        assert!(out.stdout.contains("bc1q"));
+    }
+
     /// The nine allowlisted forms must all reach the renderer, not just the one the
     /// tracer bullet was built around.
     #[test]
@@ -279,7 +454,8 @@ mod tests {
         let descriptor = format!("wsh(sortedmulti(2,{}/<0;1>/*,{}/<0;1>/*))", XPUB, x2);
         let out = run(args(&["list", &descriptor, "--count", "1"]))
             .ok()
-            .unwrap();
+            .unwrap()
+            .stdout;
 
         assert!(out.contains("bc1qpsnmhwhv2cvnyp25efl8xvpyyenc8qr7zt0fj47dklj0txpc4e0q7vlzgy"));
         assert!(out.contains("wsh(sortedmulti)"));
