@@ -49,9 +49,25 @@
 //!
 //! # What this build accepts
 //!
-//! `wpkh` only, single- or two-path. The full nine-form allowlist is in progress; the
-//! set is closed by design, so a form this crate has not considered is refused rather
-//! than attempted.
+//! A closed set of **nine forms**, single- or two-path:
+//!
+//! | Single-sig | Multisig |
+//! |---|---|
+//! | `pkh(KEY)` | `wsh(sortedmulti(k,…))` |
+//! | `sh(wpkh(KEY))` | `sh(wsh(sortedmulti(k,…)))` |
+//! | `wpkh(KEY)` | `wsh(multi(k,…))` |
+//! | `tr(KEY)` key-path only | `sh(multi(k,…))` |
+//!
+//! plus `tr(INTERNAL, multi_a(k, KEYS…))` with a single leaf.
+//!
+//! The set is closed **by an explicit walk**, not by "whatever the parser accepts",
+//! so a form this crate has not considered is refused rather than attempted — and a
+//! future version of the underlying library cannot silently widen it. A dependency
+//! bump is not a policy change.
+//!
+//! The governing principle is the **create/read asymmetry**: refuse to *manufacture*
+//! a footgun, never refuse to *show* funds that already exist. Refusing to create
+//! costs one error message; refusing to read costs someone sight of their own money.
 
 #![deny(missing_debug_implementations)]
 #![warn(missing_docs)]
@@ -59,11 +75,22 @@
 mod canonical;
 mod error;
 mod index;
+mod origin;
+mod policy;
 mod record;
 mod validated;
 
+/// The descriptor forms this build accepts, in descriptor syntax.
+///
+/// Derived from the policy itself rather than written out again, so a caller listing
+/// what is supported cannot drift from what is actually enforced.
+pub fn supported_forms() -> impl Iterator<Item = &'static str> {
+    policy::allowed_forms()
+}
+
 pub use error::DescriptorError;
 pub use index::NormalIndex;
+pub use origin::KeyOrigin;
 pub use record::{AddressRecord, KeychainKind, ScriptType};
 pub use validated::{Addresses, Keychain, ValidatedDescriptor};
 

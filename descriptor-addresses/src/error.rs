@@ -31,6 +31,20 @@ pub enum DescriptorError {
         form: String,
     },
 
+    /// The form is one this crate would accept, but the library beneath it cannot
+    /// parse it at all.
+    ///
+    /// Separate from [`DescriptorError::UnsupportedForm`] because the two are
+    /// different news for the reader. "Not on our list" invites them to check what
+    /// they pasted; "absent upstream" tells them nothing they type will help, and
+    /// saves an evening spent hunting a mistake they did not make.
+    UnsupportedUpstream {
+        /// The form as written in descriptor syntax, e.g. `sortedmulti_a`.
+        form: String,
+        /// What is missing upstream, and what it costs the user.
+        detail: String,
+    },
+
     /// A hardened step appeared in the wildcard position (`/*h` or `/*'`).
     ///
     /// Observed against miniscript 13.1.0: such a descriptor parses, reports its
@@ -66,9 +80,12 @@ impl fmt::Display for DescriptorError {
             }
             DescriptorError::UnsupportedForm { form } => write!(
                 f,
-                "descriptor form `{}` is not supported; this build accepts wpkh only",
+                "descriptor form `{}` is not on this crate's allowlist",
                 form
             ),
+            DescriptorError::UnsupportedUpstream { form, detail } => {
+                write!(f, "`{}` is not a mistake on your part: {}", form, detail)
+            }
             DescriptorError::HardenedWildcard => write!(
                 f,
                 "a hardened step cannot be a wildcard: use `/*` for the derivable \

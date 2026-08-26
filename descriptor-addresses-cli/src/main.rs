@@ -27,8 +27,7 @@ OPTIONS:
     --start N   first index to derive (default 0)
     --count N   how many indices to derive (default 20)
     -h, --help  print this message
-
-This build accepts mainnet wpkh descriptors only.";
+";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -37,7 +36,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(Failure::Usage(message)) => {
-            eprintln!("{}\n\n{}", message, USAGE);
+            eprintln!("{}\n\n{}{}", message, USAGE, supported_forms());
             // Exit codes are formalised by the ticket that owns the process boundary;
             // 2-for-usage is the convention that ticket will inherit.
             ExitCode::from(2)
@@ -49,6 +48,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// The supported-forms block of the help text.
+///
+/// Built from the library's own list rather than typed out here. A CLI that
+/// advertises a form the library refuses — or omits one it accepts — sends the reader
+/// looking for a mistake in their descriptor that is really a mistake in this string.
+fn supported_forms() -> String {
+    let mut out = String::from("\nAccepts these mainnet descriptor forms:\n");
+    for form in descriptor_addresses::supported_forms() {
+        out.push_str("    ");
+        out.push_str(form);
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Debug)]
 enum Failure {
     Usage(String),
     Descriptor(DescriptorError),
@@ -239,12 +254,34 @@ mod tests {
         }
     }
 
+    /// `pkh` stood here while `wpkh` was the only supported form; ticket 03 admitted
+    /// it, so the example had to become a form the allowlist still excludes. A
+    /// timelock branch is a durable choice — arbitrary miniscript is deferred with a
+    /// known expiry rather than about to be allowed.
     #[test]
     fn an_unsupported_form_reports_the_descriptor_error() {
-        let descriptor = format!("pkh({}/0/*)", XPUB);
+        let descriptor = format!("wsh(and_v(v:pk({}/0/*),older(144)))", XPUB);
         match run(args(&["list", &descriptor])) {
-            Err(Failure::Descriptor(e)) => assert!(format!("{}", e).contains("pkh")),
-            _ => panic!("expected a descriptor error naming the form"),
+            Err(Failure::Descriptor(DescriptorError::UnsupportedForm { form })) => {
+                // The variant is the assertion; the shape it carries is the
+                // requirement. Wording around them is free to change.
+                assert_eq!(form, "wsh(miniscript)");
+            }
+            other => panic!("expected UnsupportedForm, got {:?}", other.err()),
         }
+    }
+
+    /// The nine allowlisted forms must all reach the renderer, not just the one the
+    /// tracer bullet was built around.
+    #[test]
+    fn a_multisig_descriptor_lists_through_the_cli() {
+        let x2 = "xpub661MyMwAqRbcFW31YEwpkMuc5THy2PSt5bDMsktWQcFF8syAmRUapSCGu8ED9W6oDMSgv6Zz8idoc4a6mr8BDzTJY47LJhkJ8UB7WEGuduB";
+        let descriptor = format!("wsh(sortedmulti(2,{}/<0;1>/*,{}/<0;1>/*))", XPUB, x2);
+        let out = run(args(&["list", &descriptor, "--count", "1"]))
+            .ok()
+            .unwrap();
+
+        assert!(out.contains("bc1qpsnmhwhv2cvnyp25efl8xvpyyenc8qr7zt0fj47dklj0txpc4e0q7vlzgy"));
+        assert!(out.contains("wsh(sortedmulti)"));
     }
 }

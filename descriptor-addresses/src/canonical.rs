@@ -24,12 +24,27 @@ use crate::DescriptorError;
 /// The blanket replace is safe because `'` appears in no other role: it is not in the
 /// base58, bech32 or hex alphabets, so within a descriptor a `'` can only ever be a
 /// hardened marker.
+/// Rewrite hardened markers from `'` to `h`.
+///
+/// **Every string this crate shows a human goes through here** — the canonical
+/// descriptor, key origins, and the `tr()` internal key alike. That is the whole
+/// point: an earlier version rewrote the descriptor but let origins and the internal
+/// key render themselves, which put `48h` on one line and `48'` on the next. A screen
+/// that contradicts itself about notation is worse than either notation alone.
+///
+/// The blanket replace is safe because `'` appears in no other role: it is not in the
+/// base58, bech32 or hex alphabets, so within a descriptor a `'` can only ever be a
+/// hardened marker.
+pub(crate) fn h_notation(rendered: &str) -> String {
+    rendered.replace('\'', "h")
+}
+
 pub(crate) fn canonical_h_form(
     descriptor: &Descriptor<DescriptorPublicKey>,
 ) -> Result<String, DescriptorError> {
     // `{:#}` renders without a checksum; `{}` would append miniscript's own, computed
     // over the `'`-form we are about to rewrite.
-    let body = format!("{:#}", descriptor).replace('\'', "h");
+    let body = h_notation(&format!("{:#}", descriptor));
 
     let mut engine = checksum::Engine::new();
     engine.input(&body).map_err(DescriptorError::parse)?;

@@ -68,6 +68,17 @@ impl ScriptType {
 
     /// Whether this form is one the crate enumerates, as opposed to one it is
     /// reporting verbatim because it has no name for it.
+    ///
+    /// **Always `true` in v1**, and that is a property of the allowlist rather than
+    /// of this flag: an unenumerated form is refused at `parse`, so no record for one
+    /// is ever constructed. Today an unrecognised shape reaches the user through the
+    /// refusal message instead, which carries the same string this field would.
+    ///
+    /// It is here rather than deferred because the field is what makes widening the
+    /// allowlist a non-breaking change. The moment a leaf policy admits a form with
+    /// no enumerated name — the stated destination for this crate — records start
+    /// carrying `false`, and a caller written against this API today keeps compiling.
+    /// Adding the field later would not.
     pub fn recognised(&self) -> bool {
         self.recognised
     }
