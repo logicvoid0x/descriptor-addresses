@@ -2,10 +2,14 @@ use std::str::FromStr;
 
 use bitcoin::secp256k1::{Secp256k1, VerifyOnly};
 use bitcoin::Network;
-use miniscript::descriptor::{Descriptor, DescriptorPublicKey, DescriptorType};
+use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
 
-use crate::canonical::canonical_h_form;
-use crate::{AddressRecord, DescriptorError, KeychainKind, NormalIndex, ScriptType};
+use miniscript::ForEachKey;
+
+use crate::canonical::{canonical_h_form, h_notation};
+use crate::{
+    policy, AddressRecord, DescriptorError, KeyOrigin, KeychainKind, NormalIndex, ScriptType,
+};
 
 /// A descriptor that has been checked, and whose checks do not need repeating.
 ///
@@ -18,6 +22,10 @@ pub struct ValidatedDescriptor {
     canonical: String,
     network: Network,
     script_type: ScriptType,
+    origins: Vec<KeyOrigin>,
+    /// Present only for `tr()`. Reported as a fact; whether it is a recognised NUMS
+    /// point is an advisory, and deliberately a separate question.
+    internal_key: Option<String>,
     external: Descriptor<DescriptorPublicKey>,
     internal: Option<Descriptor<DescriptorPublicKey>>,
     /// A verification-only context, built once and shared by both keychains.
@@ -45,24 +53,31 @@ impl ValidatedDescriptor {
             return Err(DescriptorError::HardenedWildcard);
         }
 
+        // Two forms have to be refused before miniscript sees the string, because
+        // miniscript's own error would point at the wrong thing.
+        policy::check_before_parse(descriptor)?;
+
         let parsed = Descriptor::<DescriptorPublicKey>::from_str(descriptor)
             .map_err(DescriptorError::parse)?;
 
-        // Ticket 03 replaces this with the recursive walk over a leaf policy and a
-        // depth bound. Until then the allowlist is a single form, but it is already an
-        // explicit *acceptance* rather than a rejection of known-bad input: a form we
-        // have not considered is refused by default, so a later miniscript version
-        // cannot silently widen what we accept.
-        let form = form_name(parsed.desc_type());
-        if form != "wpkh" {
-            return Err(DescriptorError::UnsupportedForm {
-                form: form.to_string(),
-            });
-        }
+        // The allowlist, as a walk over configuration rather than a match on
+        // miniscript's descriptor type. See `policy` for why that shape matters.
+        let form = policy::check(&parsed)?;
 
         // The canonical form is computed from the multipath descriptor, before it is
         // split, so it round-trips as the single string the user must back up.
         let canonical = canonical_h_form(&parsed)?;
+
+        // Descriptor-level facts, gathered before the split for the same reason:
+        // they describe the wallet, not one of its two chains.
+        let origins = origins_of(&parsed);
+        let internal_key = match &parsed {
+            // Through `h_notation` like everything else shown to a human: an internal
+            // key can carry its own origin, and rendering it raw would print `'` next
+            // to the `h` in the canonical string directly above it.
+            Descriptor::Tr(tr) => Some(h_notation(&tr.internal_key().to_string())),
+            _ => None,
+        };
 
         // Multipath has to be split before anything can be derived: `at_derivation_index`
         // errors on any multipath descriptor. One path means external only.
@@ -94,6 +109,8 @@ impl ValidatedDescriptor {
             canonical,
             network,
             script_type: ScriptType::known(form),
+            origins,
+            internal_key,
             external,
             internal,
             secp: Secp256k1::verification_only(),
@@ -119,6 +136,26 @@ impl ValidatedDescriptor {
     /// The shape of script this descriptor pays to.
     pub fn script_type(&self) -> &ScriptType {
         &self.script_type
+    }
+
+    /// Each key's origin, in the order the keys appear.
+    ///
+    /// A descriptor-level fact, not a per-address one: a 2-of-3 has one origin per
+    /// key, so no single derivation path describes an address. Keys carrying no
+    /// origin are absent from this list rather than represented by a placeholder.
+    pub fn origins(&self) -> &[KeyOrigin] {
+        &self.origins
+    }
+
+    /// The `tr()` internal key, or `None` for every other form.
+    ///
+    /// Reported, never adjudicated. Whether the key is a recognised NUMS point — and
+    /// so whether the key path is meant to be unspendable — is a separate question
+    /// answered by an advisory, because unspendability is not detectable in general:
+    /// an arbitrary x-only key may be a NUMS point tweaked by a value only its owner
+    /// knows.
+    pub fn internal_key(&self) -> Option<&str> {
+        self.internal_key.as_deref()
     }
 
     /// Lend out one chain as a borrowed view.
@@ -241,22 +278,32 @@ impl<'a> Iterator for Addresses<'a> {
     }
 }
 
-/// Name a descriptor form in descriptor syntax.
+/// Collect each key's origin, once, from the descriptor as a whole.
 ///
-/// A match rather than a stringified debug value, so adding a form upstream produces
-/// a compile-time question here instead of a silently mislabelled string.
-fn form_name(ty: DescriptorType) -> &'static str {
-    match ty {
-        DescriptorType::Bare => "bare",
-        DescriptorType::Sh => "sh",
-        DescriptorType::Pkh => "pkh",
-        DescriptorType::Wpkh => "wpkh",
-        DescriptorType::Wsh => "wsh",
-        DescriptorType::ShWsh => "sh(wsh)",
-        DescriptorType::ShWpkh => "sh(wpkh)",
-        DescriptorType::ShSortedMulti => "sh(sortedmulti)",
-        DescriptorType::WshSortedMulti => "wsh(sortedmulti)",
-        DescriptorType::ShWshSortedMulti => "sh(wsh(sortedmulti))",
-        DescriptorType::Tr => "tr",
-    }
+/// Keys without an origin contribute nothing rather than a placeholder: absence is
+/// reported by the list being shorter than the key count, and an advisory names it.
+fn origins_of(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<KeyOrigin> {
+    let mut origins = Vec::new();
+
+    descriptor.for_each_key(|key| {
+        let origin = match key {
+            DescriptorPublicKey::Single(single) => single.origin.as_ref(),
+            DescriptorPublicKey::XPub(xpub) => xpub.origin.as_ref(),
+            DescriptorPublicKey::MultiXPub(multi) => multi.origin.as_ref(),
+        };
+
+        if let Some((fingerprint, path)) = origin {
+            let rendered = h_notation(&format!("{}", path));
+            let rendered = if rendered.starts_with('m') {
+                rendered
+            } else {
+                format!("m/{}", rendered.trim_start_matches('/'))
+            };
+            origins.push(KeyOrigin::new(*fingerprint, rendered));
+        }
+
+        true
+    });
+
+    origins
 }

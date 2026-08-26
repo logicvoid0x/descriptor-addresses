@@ -121,21 +121,10 @@ fn network_is_bound_at_construction() {
     assert_eq!(d.network(), Network::Bitcoin);
 }
 
-/// Only `wpkh` ships in this slice. The full nine-form allowlist is ticket 03, but
-/// the refusal must already name the form rather than leaking a parser message.
-///
-/// Asserting the variant rather than the message means the wording stays free to
-/// change without silently un-testing the rule.
-#[test]
-fn other_forms_are_refused_by_name() {
-    let pkh = format!("pkh({}/0/*)", XPUB);
-    let err = ValidatedDescriptor::parse(&pkh, Network::Bitcoin).unwrap_err();
-
-    match err {
-        DescriptorError::UnsupportedForm { form } => assert_eq!(form, "pkh"),
-        other => panic!("expected UnsupportedForm naming pkh, got {:?}", other),
-    }
-}
+// A test asserting `pkh` was refused lived here while `wpkh` was the only supported
+// form. Ticket 03 admitted `pkh` to the allowlist, which made that assertion false —
+// correctly, and the test failing was the signal. Allowlist coverage, acceptances and
+// refusals alike, now lives in forms.rs, which is the file that owns the policy.
 
 /// Observed against miniscript 13.1.0: a hardened wildcard parses, reports its
 /// descriptor type, passes miniscript's own `sanity_check()`, and then PANICS on
