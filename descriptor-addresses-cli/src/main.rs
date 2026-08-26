@@ -14,8 +14,8 @@
 use std::process::ExitCode;
 
 use descriptor_addresses::{
-    AddressRecord, Advisory, DescriptorError, KeychainKind, Network, NormalIndex,
-    ValidatedDescriptor,
+    AddressRecord, Advisory, DescriptorError, DescriptorKey, KeyOrdering, KeychainKind, Multisig,
+    MultisigScript, Network, NormalIndex, SingleSig, SingleSigScript, ValidatedDescriptor,
 };
 
 const USAGE: &str = "\
@@ -24,10 +24,12 @@ descaddr — derive addresses from a Bitcoin output descriptor
 USAGE:
     descaddr list <DESCRIPTOR> [--start N] [--count N] [--allow-duplicate-keys]
     descaddr echo <DESCRIPTOR>
+    descaddr assemble --key K [--key K ...] --script TYPE [--threshold N] [--as-given]
 
 COMMANDS:
     list   derive and print addresses
     echo   print the full canonical descriptor, unelided
+    assemble  build a descriptor from keys and flags, and echo it back
 
 OPTIONS:
     --start N   first index to derive (default 0)
@@ -65,6 +67,14 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         Err(Failure::Descriptor(e)) => {
+            eprintln!("error: {}", e);
+            ExitCode::FAILURE
+        }
+        Err(Failure::Key(e)) => {
+            eprintln!("error: {}", e);
+            ExitCode::FAILURE
+        }
+        Err(Failure::Assembly(e)) => {
             eprintln!("error: {}", e);
             ExitCode::FAILURE
         }
@@ -112,8 +122,15 @@ fn render_advisories(advisories: &[Advisory]) -> String {
 
 #[derive(Debug)]
 enum Failure {
+    /// The command line itself was wrong: exit 2, print usage.
     Usage(String),
+    /// The descriptor was refused. Exit 1 with the reason -- printing usage here
+    /// would bury a specific, actionable error under a wall of flags.
     Descriptor(DescriptorError),
+    /// A key was refused before assembly could start.
+    Key(descriptor_addresses::KeyError),
+    /// The parts did not assemble into something this crate accepts.
+    Assembly(descriptor_addresses::AssemblyError),
 }
 
 impl From<DescriptorError> for Failure {
@@ -130,8 +147,149 @@ fn run(args: Vec<String>) -> Result<Output, Failure> {
     match args[0].as_str() {
         "list" => list(&args[1..]),
         "echo" => echo(&args[1..]),
+        "assemble" => assemble(&args[1..]),
         other => Err(Failure::Usage(format!("unknown command `{}`", other))),
     }
+}
+
+/// Build a descriptor from keys and flags, and echo it back.
+///
+/// The echo is a safety feature rather than a courtesy: the descriptor is the single
+/// string that recovers this wallet, and a user who assembled one from parts has never
+/// seen it before. It is printed first, and on its own line, so it can be redirected
+/// to a file without the address table coming with it.
+///
+/// This is the non-interactive half. Prompting for the same values when flags are
+/// absent is a later ticket, and it will call these same library functions with these
+/// same structs — the library cannot tell the difference.
+fn assemble(args: &[String]) -> Result<Output, Failure> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut script: Option<String> = None;
+    let mut threshold: Option<u32> = None;
+    let mut ordering = KeyOrdering::Sorted;
+    let mut count: u32 = 20;
+
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--key" => keys.push(value("--key", rest.next())?),
+            "--script" => script = Some(value("--script", rest.next())?),
+            "--threshold" => threshold = Some(number("--threshold", rest.next())?),
+            "--count" => count = number("--count", rest.next())?,
+            // `sortedmulti` is the default because it is the safe one: every cosigner
+            // derives the same addresses regardless of the order they typed keys in.
+            // Choosing `multi` makes the order part of the wallet, so it is opt-in.
+            "--as-given" => ordering = KeyOrdering::AsGiven,
+            other => return Err(Failure::Usage(format!("unknown option `{}`", other))),
+        }
+    }
+
+    if keys.is_empty() {
+        return Err(Failure::Usage(
+            "no keys given: pass --key for each cosigner".to_string(),
+        ));
+    }
+
+    let script = script.ok_or_else(|| {
+        // The one prompt this command will never guess its way out of. Four script
+        // types derive four incompatible sets of addresses from the same key, and
+        // picking one for the user is the exact failure this crate exists to prevent.
+        Failure::Usage(
+            "--script is required: pkh, sh-wpkh, wpkh, tr for a single key; \
+             wsh or sh-wsh for a quorum"
+                .to_string(),
+        )
+    })?;
+
+    let parsed: Result<Vec<DescriptorKey>, _> =
+        keys.iter().map(|k| DescriptorKey::parse(k)).collect();
+    // A rejected key is a descriptor problem, not a command-line one: exit 1 with the
+    // reason rather than exit 2 with a wall of flags the user got right.
+    let parsed = parsed.map_err(Failure::Key)?;
+
+    let wallet = match threshold {
+        None => {
+            if parsed.len() > 1 {
+                return Err(Failure::Usage(
+                    "--threshold is required when more than one --key is given".to_string(),
+                ));
+            }
+            ValidatedDescriptor::assemble_single_sig(SingleSig {
+                key: parsed.into_iter().next().expect("checked non-empty"),
+                script_type: single_sig_script(&script)?,
+                network: Network::Bitcoin,
+                path: None,
+            })
+        }
+        Some(threshold) => ValidatedDescriptor::assemble_multisig(Multisig {
+            keys: parsed,
+            threshold,
+            script_type: multisig_script(&script)?,
+            ordering,
+            network: Network::Bitcoin,
+            path: None,
+        }),
+    }
+    .map_err(Failure::Assembly)?;
+
+    let start = NormalIndex::ZERO;
+    let mut records: Vec<AddressRecord> = wallet.external().addresses(start, count).collect();
+    if let Some(change) = wallet.internal() {
+        records.extend(change.addresses(start, count));
+    }
+
+    Ok(Output {
+        stdout: format!("{}\n\n{}", wallet.canonical(), render(&wallet, &records)),
+        advisories: render_advisories(wallet.advisories()),
+    })
+}
+
+fn single_sig_script(name: &str) -> Result<SingleSigScript, Failure> {
+    match name {
+        "pkh" => Ok(SingleSigScript::Pkh),
+        "sh-wpkh" => Ok(SingleSigScript::ShWpkh),
+        "wpkh" => Ok(SingleSigScript::Wpkh),
+        "tr" => Ok(SingleSigScript::Tr),
+        // Named explicitly rather than falling through to "unknown", because a user
+        // asking for `wsh` with one key has misunderstood something specific.
+        "wsh" | "sh-wsh" => Err(Failure::Usage(format!(
+            "`{}` is a multisig script type; pass --threshold and more than one --key",
+            name
+        ))),
+        other => Err(Failure::Usage(format!(
+            "unknown script type `{}`: expected pkh, sh-wpkh, wpkh or tr",
+            other
+        ))),
+    }
+}
+
+fn multisig_script(name: &str) -> Result<MultisigScript, Failure> {
+    match name {
+        "wsh" => Ok(MultisigScript::Wsh),
+        "sh-wsh" => Ok(MultisigScript::ShWsh),
+        // The refusal ticket 02 decided, surfaced where a user meets it. `tr` is not
+        // assemblable at all: a taproot output needs an internal key, which is a
+        // second single-key route around the quorum.
+        "tr" => Err(Failure::Usage(
+            "taproot multisig cannot be assembled: a tr() output needs an internal \
+             key, which is a second single-key way to spend the same coins. Write the \
+             tr(...) descriptor yourself and pass it to `list` if that is what you want"
+                .to_string(),
+        )),
+        "pkh" | "sh-wpkh" | "wpkh" => Err(Failure::Usage(format!(
+            "`{}` is a single-key script type; drop --threshold or pass one --key",
+            name
+        ))),
+        other => Err(Failure::Usage(format!(
+            "unknown script type `{}`: expected wsh or sh-wsh",
+            other
+        ))),
+    }
+}
+
+fn value(flag: &str, next: Option<&String>) -> Result<String, Failure> {
+    next.cloned()
+        .ok_or_else(|| Failure::Usage(format!("{} needs a value", flag)))
 }
 
 /// Print the full canonical descriptor and nothing else.
@@ -430,6 +588,65 @@ mod tests {
             "got: {}",
             out.advisories
         );
+    }
+
+    /// The echoed descriptor comes first and on its own line, so it can be redirected
+    /// to a file without the address table following it.
+    #[test]
+    fn assemble_echoes_the_descriptor_before_the_table() {
+        let out = run(args(&[
+            "assemble",
+            "--key",
+            &format!("[aabbccdd]{}", XPUB),
+            "--script",
+            "wpkh",
+            "--count",
+            "1",
+        ]))
+        .ok()
+        .unwrap()
+        .stdout;
+
+        let first = out.lines().next().unwrap();
+        assert!(
+            first.starts_with("wpkh([aabbccdd/84h/0h/0h]"),
+            "got: {}",
+            first
+        );
+        assert!(first.ends_with("#4ws9vksj"), "got: {}", first);
+        assert!(out.contains("bc1qp5wfcq48h6d63wyy9qz0awtpfqwwv4sma86mhz"));
+    }
+
+    /// Ticket 02's refusal, surfaced where a user actually meets it — and phrased as
+    /// the reason rather than as "unsupported".
+    #[test]
+    fn assembling_taproot_multisig_is_refused_with_the_reason() {
+        match run(args(&[
+            "assemble",
+            "--key",
+            XPUB,
+            "--script",
+            "tr",
+            "--threshold",
+            "2",
+        ])) {
+            Err(Failure::Usage(message)) => {
+                assert!(message.contains("internal key"), "got: {}", message)
+            }
+            other => panic!("expected a usage refusal, got {:?}", other.err()),
+        }
+    }
+
+    /// Never guess a script type. Four of them derive four incompatible sets of
+    /// addresses from one key, so the absence of this flag has to be a refusal.
+    #[test]
+    fn assemble_requires_an_explicit_script_type() {
+        match run(args(&["assemble", "--key", XPUB])) {
+            Err(Failure::Usage(message)) => {
+                assert!(message.contains("--script is required"), "got: {}", message)
+            }
+            other => panic!("expected a usage refusal, got {:?}", other.err()),
+        }
     }
 
     /// Advisories are commentary, not data. They must not land on stdout, or piping

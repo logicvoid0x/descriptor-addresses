@@ -73,6 +73,7 @@
 #![warn(missing_docs)]
 
 mod advisory;
+mod assembly;
 mod canonical;
 mod error;
 mod index;
@@ -91,6 +92,9 @@ pub fn supported_forms() -> impl Iterator<Item = &'static str> {
 }
 
 pub use advisory::Advisory;
+pub use assembly::{
+    DescriptorKey, KeyOrdering, Multisig, MultisigScript, SingleSig, SingleSigScript,
+};
 pub use error::{AssemblyError, DescriptorError, KeyError, NetworkClass};
 pub use index::NormalIndex;
 pub use origin::KeyOrigin;
