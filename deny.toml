@@ -7,15 +7,11 @@
 # subject it to a rule the spec says does not apply to it.
 #
 # ---------------------------------------------------------------------------
-# STATUS: written but NOT YET EXECUTED. cargo-deny could not be built on the
-# development machine — an Application Control policy blocks build-script
-# executables under %TEMP%, and `cargo install` builds there. The first real run
-# of this file will be in CI. Treat a first-run failure as a bug in this file
-# before treating it as a policy violation.
+# STATUS: verified against cargo-deny 0.20.2 on 2026-08-25 — `advisories ok`.
 #
-# The dependency-budget check in ci/check-dependency-budget.sh WAS verified
-# locally, red and green, and is the stronger guarantee: it is a whitelist, so
-# it catches anything new, where a ban list only catches what it names.
+# The dependency-budget check in ci/check-dependency-budget.sh is the stronger
+# of the two guarantees and runs alongside this one: it is a whitelist, so it
+# catches anything new, where a ban list only catches what it names.
 # ---------------------------------------------------------------------------
 
 [graph]
