@@ -72,6 +72,7 @@
 #![deny(missing_debug_implementations)]
 #![warn(missing_docs)]
 
+mod advisory;
 mod canonical;
 mod error;
 mod index;
@@ -89,6 +90,7 @@ pub fn supported_forms() -> impl Iterator<Item = &'static str> {
     policy::allowed_forms()
 }
 
+pub use advisory::Advisory;
 pub use error::{AssemblyError, DescriptorError, KeyError, NetworkClass};
 pub use index::NormalIndex;
 pub use origin::KeyOrigin;

@@ -10,7 +10,8 @@ use miniscript::ForEachKey;
 
 use crate::canonical::{canonical_h_form, h_notation};
 use crate::{
-    policy, rules, AddressRecord, DescriptorError, KeyOrigin, KeychainKind, NormalIndex, ScriptType,
+    advisory, policy, rules, AddressRecord, Advisory, DescriptorError, KeyOrigin, KeychainKind,
+    NormalIndex, ScriptType,
 };
 
 /// A descriptor that has been checked, and whose checks do not need repeating.
@@ -25,6 +26,7 @@ pub struct ValidatedDescriptor {
     network: Network,
     script_type: ScriptType,
     origins: Vec<KeyOrigin>,
+    advisories: Vec<Advisory>,
     /// Present only for `tr()`. Reported as a fact; whether it is a recognised NUMS
     /// point is an advisory, and deliberately a separate question.
     internal_key: Option<String>,
@@ -98,7 +100,7 @@ impl ValidatedDescriptor {
         enforce_network(&parsed, network)?;
 
         // Rules that need the parsed structure rather than the raw text.
-        rules::after_parse(&parsed, allow_duplicate_keys)?;
+        let duplicate = rules::after_parse(&parsed, allow_duplicate_keys)?;
 
         // Descriptor-level facts, gathered before the split for the same reason:
         // they describe the wallet, not one of its two chains.
@@ -110,6 +112,17 @@ impl ValidatedDescriptor {
             Descriptor::Tr(tr) => Some(h_notation(&tr.internal_key().to_string())),
             _ => None,
         };
+
+        // Gathered here, while both the raw input and the parsed tree are in hand:
+        // the checksum and notation findings live in the text, the origin and NUMS
+        // findings live in the tree.
+        let advisories = advisories_of(
+            &parsed,
+            descriptor,
+            &origins,
+            internal_key.as_deref(),
+            duplicate,
+        );
 
         // Multipath has to be split before anything can be derived: `at_derivation_index`
         // errors on any multipath descriptor. One path means external only.
@@ -142,6 +155,7 @@ impl ValidatedDescriptor {
             network,
             script_type: ScriptType::known(form),
             origins,
+            advisories,
             internal_key,
             external,
             internal,
@@ -177,6 +191,16 @@ impl ValidatedDescriptor {
     /// origin are absent from this list rather than represented by a placeholder.
     pub fn origins(&self) -> &[KeyOrigin] {
         &self.origins
+    }
+
+    /// Non-fatal findings, computed once at parse.
+    ///
+    /// Separate from the facts above because the two grow differently: the facts are a
+    /// small bounded set that each get an accessor, while this list is open-ended and
+    /// must be able to gain entries in a patch release. Returning it as a slice means
+    /// a caller on the happy path never has to destructure anything to ignore it.
+    pub fn advisories(&self) -> &[Advisory] {
+        &self.advisories
     }
 
     /// The `tr()` internal key, or `None` for every other form.
@@ -308,6 +332,80 @@ impl<'a> Iterator for Addresses<'a> {
         self.next = index.next();
         Some(self.keychain.address_at(index))
     }
+}
+
+/// Gather every non-fatal finding, once, at parse.
+///
+/// Stored rather than recomputed per call: a coordinator scanning ten thousand
+/// indices should pay for this exactly once, and two reads must not be able to
+/// disagree.
+fn advisories_of(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+    raw: &str,
+    origins: &[KeyOrigin],
+    internal_key: Option<&str>,
+    duplicate_key: Option<String>,
+) -> Vec<Advisory> {
+    let mut found = Vec::new();
+
+    if !raw.contains('#') {
+        found.push(Advisory::ChecksumAbsent);
+    }
+
+    // The rewrite is detected on the *input*, not by diffing the two strings: our
+    // canonical form never contains `'`, so a diff would report a rewrite for every
+    // descriptor that happens to differ for any other reason.
+    if raw.contains('\'') {
+        found.push(Advisory::NotationRewritten);
+    }
+
+    // Reported once for the descriptor, not once per key without one. A caller
+    // learns "some key here cannot route a PSBT unaided", which is a fact about the
+    // descriptor; which key is missing an origin is visible from `origins()`.
+    if origins.len() < origin_bearing_keys(descriptor) {
+        found.push(Advisory::OriginAbsent);
+    }
+
+    if let Some(key) = duplicate_key {
+        found.push(Advisory::DuplicateKey { key });
+    }
+
+    // Only for a `tr()` that actually has a script path. A key-path-only taproot is
+    // *meant* to be spendable through its internal key, so remarking that the key is
+    // not a NUMS point would fire on every ordinary taproot wallet and teach the
+    // reader to ignore the channel.
+    if let Some(key) = internal_key {
+        let has_script_path = matches!(descriptor, Descriptor::Tr(tr) if tr.tap_tree().is_some());
+        if has_script_path && !advisory::is_known_nums(key) {
+            found.push(Advisory::NumsUnrecognised {
+                key: key.to_string(),
+            });
+        }
+    }
+
+    found
+}
+
+/// How many keys could meaningfully carry an origin.
+///
+/// A raw `tr()` internal key is excluded, and the exclusion is load-bearing rather
+/// than cosmetic: a NUMS point has no derivation path, so there is no origin it could
+/// ever state. Counting it made the canonical script-path-only taproot multisig report
+/// a missing origin **even when every signing key had one** — an advisory that fires
+/// on a wallet with nothing wrong with it, which is how a reporting channel teaches
+/// people to ignore it.
+fn origin_bearing_keys(descriptor: &Descriptor<DescriptorPublicKey>) -> usize {
+    let exempt = rules::raw_internal_key(descriptor);
+    let mut count = 0;
+
+    descriptor.for_each_key(|key| {
+        if exempt.as_deref() != Some(key.to_string().as_str()) {
+            count += 1;
+        }
+        true
+    });
+
+    count
 }
 
 /// Enforce that the keys belong to the network this descriptor is being read as.
