@@ -1,14 +1,16 @@
 use std::str::FromStr;
 
 use bitcoin::secp256k1::{Secp256k1, VerifyOnly};
-use bitcoin::Network;
-use miniscript::descriptor::{Descriptor, DescriptorPublicKey};
+use bitcoin::{Network, NetworkKind};
+use miniscript::descriptor::{Descriptor, DescriptorPublicKey, XKeyNetwork};
+
+use crate::error::NetworkClass;
 
 use miniscript::ForEachKey;
 
 use crate::canonical::{canonical_h_form, h_notation};
 use crate::{
-    policy, AddressRecord, DescriptorError, KeyOrigin, KeychainKind, NormalIndex, ScriptType,
+    policy, rules, AddressRecord, DescriptorError, KeyOrigin, KeychainKind, NormalIndex, ScriptType,
 };
 
 /// A descriptor that has been checked, and whose checks do not need repeating.
@@ -42,23 +44,44 @@ pub struct ValidatedDescriptor {
 impl ValidatedDescriptor {
     /// Validate a descriptor string against `network`.
     ///
-    /// This is the only fallible call in the crate.
+    /// One of the two fallible calls in the crate, and the one to reach for. See
+    /// [`parse_permissive`](Self::parse_permissive) for the single relaxation
+    /// available, and prefer this unless you specifically need it.
     pub fn parse(descriptor: &str, network: Network) -> Result<Self, DescriptorError> {
-        // Caught before miniscript sees the string, because miniscript accepts it:
-        // `wpkh(xpub.../0/*h)` parses, reports `desc_type = Wpkh`, passes
-        // `sanity_check()`, and then panics on derivation. Observed against 13.1.0.
-        // Since `address_at` is infallible, this refusal is load-bearing — it is the
-        // only thing standing between pasted input and a process abort.
-        if descriptor.contains("/*h") || descriptor.contains("/*'") {
-            return Err(DescriptorError::HardenedWildcard);
-        }
+        Self::parse_inner(descriptor, network, false)
+    }
 
-        // Two forms have to be refused before miniscript sees the string, because
-        // miniscript's own error would point at the wrong thing.
+    /// Validate a descriptor, downgrading **duplicate keys** from an error to an
+    /// accepted quirk.
+    ///
+    /// This relaxes exactly one rule and nothing else. It exists because the
+    /// create/read asymmetry cuts both ways for duplicates: a repeated key means a
+    /// 2-of-3 is really a 1-of-2, which is a footgun worth refusing to *manufacture*
+    /// — but if such a wallet already holds funds, refusing to *show* it costs
+    /// someone sight of their own money.
+    ///
+    /// Every other rule still applies. A permissive parse still refuses hardened
+    /// wildcards, bad checksums, SLIP-132 prefixes, mixed networks and everything
+    /// else; the two constructors differ in one variant and are otherwise identical.
+    pub fn parse_permissive(descriptor: &str, network: Network) -> Result<Self, DescriptorError> {
+        Self::parse_inner(descriptor, network, true)
+    }
+
+    fn parse_inner(
+        descriptor: &str,
+        network: Network,
+        allow_duplicate_keys: bool,
+    ) -> Result<Self, DescriptorError> {
+        // Rules that have to run before miniscript sees the string, either because
+        // its error would point at the wrong thing or because accepting the input
+        // leads to a panic. See `rules` for which is which.
+        rules::before_parse(descriptor)?;
+
+        // `sortedmulti_a` also has to be caught pre-parse: miniscript blames the key.
         policy::check_before_parse(descriptor)?;
 
         let parsed = Descriptor::<DescriptorPublicKey>::from_str(descriptor)
-            .map_err(DescriptorError::parse)?;
+            .map_err(|e| rules::translate_parse_error(&e.to_string()))?;
 
         // The allowlist, as a walk over configuration rather than a match on
         // miniscript's descriptor type. See `policy` for why that shape matters.
@@ -67,6 +90,15 @@ impl ValidatedDescriptor {
         // The canonical form is computed from the multipath descriptor, before it is
         // split, so it round-trips as the single string the user must back up.
         let canonical = canonical_h_form(&parsed)?;
+
+        // Enforced, not merely reported. Granularity is xpub-versus-tpub only:
+        // testnet, testnet4 and signet share one set of version bytes, so a key
+        // cannot say which of the three was meant and this crate must not pretend
+        // otherwise.
+        enforce_network(&parsed, network)?;
+
+        // Rules that need the parsed structure rather than the raw text.
+        rules::after_parse(&parsed, allow_duplicate_keys)?;
 
         // Descriptor-level facts, gathered before the split for the same reason:
         // they describe the wallet, not one of its two chains.
@@ -276,6 +308,58 @@ impl<'a> Iterator for Addresses<'a> {
         self.next = index.next();
         Some(self.keychain.address_at(index))
     }
+}
+
+/// Enforce that the keys belong to the network this descriptor is being read as.
+///
+/// Miniscript reports the network but enforces nothing, so a mainnet xpub read as
+/// testnet yields perfectly well-formed `tb1…` addresses for money that is not there
+/// — verified against the real stack. Enforcing it is ours to do.
+///
+/// **Granularity is xpub-versus-tpub and nothing finer.** testnet, testnet4 and signet
+/// share one set of BIP-32 version bytes, so a key genuinely cannot say which of the
+/// three was meant. Pretending otherwise would mean inventing a distinction the data
+/// does not carry.
+/// A **typed** match, not a match on `Debug` output.
+///
+/// An earlier draft compared `format!("{:?}", …)` against `"Mixed"` and `"Main"`. It
+/// worked, and it made this crate's money rule depend on a foreign crate's `Debug`
+/// formatting — which is not a stable contract. The failure mode was the wrong one
+/// too: if `"Mixed"` ever stopped rendering that way, a mixed-network descriptor fell
+/// through to the equality test and was **accepted**. A rule that fails open is worse
+/// than no rule, because it reads as enforcement. Matching the enum makes an upstream
+/// change a compile error instead.
+fn enforce_network(
+    descriptor: &Descriptor<DescriptorPublicKey>,
+    declared: Network,
+) -> Result<(), DescriptorError> {
+    let keys_are_mainnet = match descriptor.xkey_network() {
+        // No extended keys at all — a raw pubkey descriptor makes no network claim to
+        // check, which is why the BIP-382/386 vectors can be accepted as written.
+        XKeyNetwork::NoXKeys => return Ok(()),
+        XKeyNetwork::Mixed => return Err(DescriptorError::MixedNetworks),
+        XKeyNetwork::Single(NetworkKind::Main) => true,
+        XKeyNetwork::Single(NetworkKind::Test) => false,
+    };
+
+    let declared_is_mainnet = declared == Network::Bitcoin;
+
+    if keys_are_mainnet != declared_is_mainnet {
+        return Err(DescriptorError::NetworkMismatch {
+            declared: if declared_is_mainnet {
+                NetworkClass::Mainnet
+            } else {
+                NetworkClass::Test
+            },
+            found: if keys_are_mainnet {
+                NetworkClass::Mainnet
+            } else {
+                NetworkClass::Test
+            },
+        });
+    }
+
+    Ok(())
 }
 
 /// Collect each key's origin, once, from the descriptor as a whole.
