@@ -41,8 +41,8 @@ Two facts pin the design:
 
 Both are exactly what [output descriptors](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki)
 exist to express. So descriptors are the canonical input, and the convenience path for bare
-keys assembles a descriptor from explicit flags and echoes it back for you to verify and
-save.
+keys assembles a descriptor from explicit flags — or, if you have no flags to give it,
+from answers to questions — and echoes it back for you to verify and save.
 
 ## Two ways in
 
@@ -51,6 +51,25 @@ save.
 - **Assembled input** — you pass bare keys plus explicit flags, and the crate assembles a
   descriptor, echoes it back, and derives from it. The descriptor is the thing you back up,
   so you are always shown the one that was built.
+
+Assembled input can be *typed* or *answered*. `descaddr assemble` with no flags at a terminal
+walks you through it instead of printing an error: single-sig is a flat sequence, because one
+key and a script type is nothing to review; multisig is staged and ends in an **editable
+review table** over fingerprint, origin and key, because a mistyped cosigner is expensive and
+that table is the last cheap moment to catch it.
+
+Both routes end at the same two library functions with the same structs, so there is no rule
+that one reaches and the other misses. Prompting is a CLI concern; the library only models.
+
+```
+descaddr assemble                              # prompts, at a terminal
+descaddr assemble --interactive < answers.txt  # prompts through a pipe
+```
+
+Without `--interactive`, a pipe with no flags gets an error rather than a prompt it cannot
+answer — a script that forgot an argument should fail, not hang. Questions are written to
+stderr, so `descaddr assemble --interactive < answers.txt > wallet.txt` puts a wallet in that
+file and nothing else.
 
 ## Supported forms
 

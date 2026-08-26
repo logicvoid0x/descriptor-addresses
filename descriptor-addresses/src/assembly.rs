@@ -147,6 +147,31 @@ impl DescriptorKey {
         }
     }
 
+    /// The key expression without its origin.
+    ///
+    /// These three accessors exist for one caller: a UI showing the user what it is
+    /// about to assemble. The alternative is that the caller re-splits the string it
+    /// already handed to [`DescriptorKey::parse`], which is a second parser that will
+    /// disagree with this one the first time either changes — and the value it would
+    /// disagree about is which key a wallet is built from.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The origin's master fingerprint, if the key stated one.
+    pub fn fingerprint(&self) -> Option<&str> {
+        self.fingerprint.as_deref()
+    }
+
+    /// The origin's derivation path, if the key stated one.
+    ///
+    /// `None` does not mean "no path": it means assembly will supply the BIP default
+    /// for the script type, which [`SingleSigScript::default_origin_path`] and
+    /// [`MultisigScript::default_origin_path`] name.
+    pub fn origin_path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
     /// Whether this key already states an origin path.
     fn has_path(&self) -> bool {
         self.path.is_some()
@@ -203,6 +228,30 @@ pub enum KeyOrdering {
     Sorted,
     /// `multi` — keys used exactly as given, so the order is part of the wallet.
     AsGiven,
+}
+
+impl SingleSigScript {
+    /// The BIP-44/49/84/86 origin path assembly uses when a key states none.
+    ///
+    /// Public because it is the one fact a confirmation screen exists to show: which
+    /// account the wallet will be derived under. A caller that hard-coded `84h/0h/0h`
+    /// into its own renderer would be stating as fact something only this crate
+    /// decides, and would go on stating it after this crate changed its mind.
+    ///
+    /// Rendered in `h` notation, the form this crate canonicalises to — not the `'`
+    /// that `DerivationPath`'s own `Display` produces.
+    pub fn default_origin_path(self, network: Network) -> String {
+        default_single_sig_path(self, network)
+    }
+}
+
+impl MultisigScript {
+    /// The BIP-48 origin path assembly uses when the keys state none.
+    ///
+    /// See [`SingleSigScript::default_origin_path`].
+    pub fn default_origin_path(self, network: Network) -> String {
+        default_multisig_path(self, network)
+    }
 }
 
 /// A single-signature wallet to assemble.
