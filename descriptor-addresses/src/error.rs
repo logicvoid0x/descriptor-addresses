@@ -394,6 +394,58 @@ pub enum AssemblyError {
         /// The key that appeared more than once.
         key: String,
     },
+
+    /// No keys were supplied, so there is no quorum to express.
+    NoKeys,
+
+    /// A derivation path was given both on the spec and inside a key's origin.
+    ///
+    /// Two sources for one value is a question rather than a default: preferring
+    /// either silently would discard something the caller actually stated.
+    PathAlreadyInKey {
+        /// The key that already carries an origin path.
+        key: String,
+    },
+
+    /// Some keys state an origin path and others do not.
+    ///
+    /// The ones without would silently take the BIP default account while the others
+    /// kept their own — putting cosigners on **different accounts in the same
+    /// quorum**, which derives a wallet nobody intended and says nothing about it.
+    MixedOrigins {
+        /// How many keys stated a path.
+        with_path: usize,
+        /// How many did not.
+        without_path: usize,
+    },
+
+    /// A derivation path was given for a key with no master fingerprint.
+    ///
+    /// BIP-380 origins require a fingerprint, and it cannot be computed from an
+    /// account xpub — so there is nowhere to record the path. Dropping it silently
+    /// would lose what the caller said.
+    PathWithoutFingerprint,
+
+    /// The assembled descriptor is not one this crate accepts.
+    ///
+    /// Assembly deliberately has no validation path of its own: whatever it builds is
+    /// handed to `parse`, so it must clear the same allowlist and the same input rules
+    /// as a pasted descriptor. This variant is that check refusing, and it exists so
+    /// the failure surfaces here rather than reaching a user as a descriptor their own
+    /// tool will not read back.
+    ///
+    /// The inner error is **carried whole, not flattened to a message**. An earlier
+    /// draft stored `reason: String`, which destroyed exactly the structured variants
+    /// the spec insists must stay distinct — and a test that could no longer name the
+    /// variant it expected had to fall back to `is_err()`, which then hid a bug where
+    /// the wrong error was firing. Structured errors are what make the testing rule
+    /// enforceable, not merely what makes prompting convenient.
+    Unbuildable {
+        /// The descriptor that was built.
+        attempted: String,
+        /// Why `parse` refused it, with its structure intact.
+        reason: Box<DescriptorError>,
+    },
 }
 
 impl From<KeyError> for AssemblyError {
@@ -412,9 +464,58 @@ impl fmt::Display for AssemblyError {
                  number of keys",
                 threshold, keys
             ),
-            AssemblyError::DuplicateKey { key } => {
-                write!(f, "the key {} was supplied more than once", key)
-            }
+            AssemblyError::DuplicateKey { key } => write!(
+                f,
+                "the key {} was supplied more than once, so the quorum would be \
+                 smaller than it looks",
+                key
+            ),
+            AssemblyError::NoKeys => write!(f, "no keys were supplied"),
+            AssemblyError::PathAlreadyInKey { key } => write!(
+                f,
+                "the key {} already states an origin path, and a path was supplied \
+                 separately as well. Two sources for one value could disagree, so \
+                 remove one",
+                key
+            ),
+            AssemblyError::MixedOrigins {
+                with_path,
+                without_path,
+            } => write!(
+                f,
+                "some keys state an origin path and others do not ({} with, {} \
+                 without). The ones without would silently take the default account, \
+                 putting cosigners on different accounts in the same quorum — supply \
+                 an origin for every key or for none",
+                with_path, without_path
+            ),
+            AssemblyError::PathWithoutFingerprint => write!(
+                f,
+                "a derivation path needs a master fingerprint to record it against, \
+                 and one cannot be computed from an account key. Supply the key as \
+                 `[fingerprint]xpub…`, or omit the path"
+            ),
+            AssemblyError::Unbuildable { attempted, reason } => write!(
+                f,
+                "those parts assemble into a descriptor this crate does not accept \
+                 ({}): {}",
+                reason, attempted
+            ),
+        }
+    }
+}
+
+impl AssemblyError {
+    /// The underlying refusal, when assembly failed because `parse` rejected what it
+    /// built.
+    ///
+    /// Exposed so a caller — or a test — can match on *why* rather than reading a
+    /// sentence. That is the whole reason [`AssemblyError::Unbuildable`] carries the
+    /// error rather than a message.
+    pub fn source_descriptor_error(&self) -> Option<&DescriptorError> {
+        match self {
+            AssemblyError::Unbuildable { reason, .. } => Some(reason),
+            _ => None,
         }
     }
 }

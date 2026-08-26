@@ -144,6 +144,45 @@ fn slip132(descriptor: &str) -> Result<(), DescriptorError> {
     Ok(())
 }
 
+/// The SLIP-132 rule, applied to a single key rather than a whole descriptor.
+///
+/// Assembly needs the same check `parse` applies, or assembly becomes a back door
+/// around it. Anchoring is trivial here — the key *is* the whole string — which is
+/// why this is a separate entry point rather than a call into [`slip132`].
+pub(crate) fn reject_slip132_key(key: &str) -> Result<(), KeyError> {
+    // Skip an origin if there is one; the prefix we care about starts the key itself.
+    let bare = key.rsplit(']').next().unwrap_or(key);
+
+    for (prefix, target_version, implies) in SLIP132 {
+        if !bare.starts_with(prefix) {
+            continue;
+        }
+        return Err(KeyError::Slip132 {
+            prefix: (*prefix).to_string(),
+            converted: reencode(bare, *target_version)
+                .unwrap_or_else(|| "(the key could not be converted)".to_string()),
+            implies: (*implies).to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Confirm a bare key expression is one miniscript will accept.
+///
+/// Delegated rather than pattern-matched: the authority on what counts as a valid key
+/// is the library that will derive from it, and a second opinion here could only ever
+/// be wrong in one direction or the other.
+pub(crate) fn validate_bare_key(key: &str) -> Result<(), KeyError> {
+    use std::str::FromStr;
+
+    DescriptorPublicKey::from_str(key)
+        .map(|_| ())
+        .map_err(|e| KeyError::Malformed {
+            detail: e.to_string(),
+        })
+}
+
 /// Byte offsets in `descriptor` where a key expression may begin, in order.
 ///
 /// Scanning left to right matters: a descriptor holding a real `zpub` beside an
