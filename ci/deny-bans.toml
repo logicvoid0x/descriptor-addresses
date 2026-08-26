@@ -8,7 +8,10 @@
 # packages including one proc-macro (a doc-only macro), so a workspace-wide ban
 # would fail CI on a rule that ticket is explicitly allowed to break.
 #
-# STATUS: never executed. See the header of deny.toml.
+# STATUS: verified against cargo-deny 0.20.2 on 2026-08-25, red and green. A
+# proc-macro added to the library fails this check (naming the crate and the
+# reason); the same proc-macro added to the CLI passes, which is the exemption
+# working rather than the check being asleep.
 
 [graph]
 targets = [
@@ -31,11 +34,10 @@ multiple-versions = "deny"
 # would wave through a third version too, which is precisely the case we would
 # want to hear about.
 #
-# NOTE: this entry's exact spelling is the single most likely thing in these two
-# files to fail on the first CI run, because cargo-deny changed the syntax for
-# package specs across versions and none of this could be executed locally.
-# If it errors, the alternatives are `{ crate = "hex-conservative:0.2.2" }` and
-# `{ name = "hex-conservative", version = "=0.2.2" }`.
+# The `name@version` spelling is confirmed correct for cargo-deny 0.20.2, and
+# confirmed load-bearing: removing this entry makes the check fail with
+# "found 2 duplicate entries for crate 'hex-conservative'". A third version
+# would still fail, which is the point of qualifying it.
 skip = [
     { crate = "hex-conservative@0.2.2", reason = "bitcoin 0.32 pins 0.2.x; miniscript 13.1 pins 1.x. Not ours to reconcile — it resolves when miniscript ships against a newer bitcoin." },
 ]
