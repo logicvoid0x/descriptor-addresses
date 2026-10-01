@@ -76,7 +76,7 @@ jobs:
       # 1.74.0 rather than miniscript's declared 1.63.0: miniscript depends on
       # hex-conservative 1.x, which resolves to 1.2.0 and needs 1.74.0. This job
       # is what found that, on its first run.
-      - uses: dtolnay/rust-toolchain@1.74.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
       # `check`, not `test`: the dev-dependencies a test run needs are exempt
       # from the MSRV promise, which covers what a consumer compiles.
